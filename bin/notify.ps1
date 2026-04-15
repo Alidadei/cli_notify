@@ -281,6 +281,10 @@ function Normalize-Reply {
   return $oneLine
 }
 
+# --- Win32 window focus helpers (for toast click-to-focus) ---
+$script:toastActivated = $false
+$script:toastWaitScript = Join-Path $PSScriptRoot "notify-toast-wait.ps1"
+
 $stateFile = Join-Path $logDir "session-map.json"
 function Update-SessionMap {
   param([string]$sessionId, [string]$projectPath, [string]$source, [string]$time)
@@ -456,13 +460,24 @@ if (Test-Path $flagWin) {
       Import-Module BurntToast -ErrorAction Stop
       $cmd = Get-Command -Name New-BurntToastNotification -ErrorAction Stop
       $params = $cmd.Parameters.Keys
-      $expire = (Get-Date).AddSeconds(5)
-      if ($params -contains 'Duration' -and $params -contains 'ExpirationTime') {
-        New-BurntToastNotification -Text $Title, $Body -Duration Short -ExpirationTime $expire | Out-Null
-      } elseif ($params -contains 'Duration') {
-        New-BurntToastNotification -Text $Title, $Body -Duration Short | Out-Null
-      } elseif ($params -contains 'ExpirationTime') {
-        New-BurntToastNotification -Text $Title, $Body -ExpirationTime $expire | Out-Null
+
+      if ($params -contains 'ActivatedAction' -and (Test-Path $script:toastWaitScript)) {
+        # Show toast via background process that handles click-to-focus
+        $script:toastActivated = $true
+        # Get current console window handle for reliable focus
+        $consoleWnd = "0"
+        try {
+          Add-Type -Namespace Win32Helper -Name Console -ErrorAction SilentlyContinue -MemberDefinition '[DllImport("kernel32.dll")] public static extern IntPtr GetConsoleWindow();'
+          $consoleWnd = [Win32Helper.Console]::GetConsoleWindow().ToString()
+        } catch {}
+        $vbsPath = Join-Path $PSScriptRoot "notify-toast-wait.vbs"
+        Write-NotifyLog -Channel "debug" -Status "info" -Message "Title='$Title' SnippetLength=$($snippet.Length) hWnd=$consoleWnd"
+        if (Test-Path $vbsPath) {
+          Start-Process wscript -ArgumentList "`"$vbsPath`"", "`"$Title`"", "`"$snippet`"", "`"$consoleWnd`"" -WindowStyle Hidden
+        } else {
+          $psArgs = "-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-File `"$($script:toastWaitScript)`"", "-Title `"$Title`"", "-Body `"$snippet`"", "-hWndParam `"$consoleWnd`""
+          Start-Process powershell -ArgumentList $psArgs -WindowStyle Hidden
+        }
       } else {
         New-BurntToastNotification -Text $Title, $Body | Out-Null
       }
@@ -478,7 +493,7 @@ if (Test-Path $flagWin) {
           if ($nodes.Count -ge 1) { $nodes.Item(0).AppendChild($xml.CreateTextNode($Title)) | Out-Null }
           if ($nodes.Count -ge 2) { $nodes.Item(1).AppendChild($xml.CreateTextNode($Body)) | Out-Null }
           $toast = [Windows.UI.Notifications.ToastNotification]::new($xml)
-          $toast.ExpirationTime = (Get-Date).AddSeconds(5)
+          $toast.ExpirationTime = (Get-Date).AddSeconds(30)
           $notifier = [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier("Windows PowerShell")
           $notifier.Show($toast)
           return $true
