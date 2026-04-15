@@ -327,6 +327,37 @@ Get-Module -ListAvailable -Name BurntToast
 
 **预期结果**：对话结束时应该弹出通知。
 
+### 5. 检查 Windows 通知设置（重要）
+
+> **很多用户反馈通知不弹出，通常是 Windows 系统设置问题，而非脚本问题。**
+
+#### 5.1 关闭专注助手
+
+专注助手会拦截所有横幅通知，这是通知不弹出的**最常见原因**：
+
+1. `Win + I` 打开设置 → **系统** → **专注助手**
+2. 或直接运行：`start ms-settings:quiethours`
+3. 确保设为"**关闭**"
+4. 如果需要保持专注助手，将 PowerShell 加入优先级列表
+
+#### 5.2 开启应用通知权限
+
+1. `Win + I` 打开设置 → **系统** → **通知和操作**
+2. 或直接运行：`start ms-settings:notifications`
+3. 确保"**获取来自应用和其他发送者的通知**"已**开启**
+4. 向下滚动找到 **PowerShell** → 点击
+5. 确保"**通知**"和"**在通知中心显示横幅**"都已开启
+
+#### 5.3 快速验证
+
+```powershell
+Import-Module BurntToast
+New-BurntToastNotification -Text '测试','如果你看到这条通知，说明设置正确！'
+```
+
+**如果看到通知** → 配置完成，可以正常使用。
+**如果没有** → 返回检查 5.1 和 5.2 的设置。
+
 ## 高级配置（可选）
 
 ### 配置企业微信通知
@@ -380,10 +411,17 @@ Start-Service -Name WpnUserService
 Set-Service -Name WpnUserService -StartupType Automatic
 ```
 
+**检查专注助手（最常见原因）**：
+1. 打开"设置" → "系统" → "专注助手"（或运行 `start ms-settings:quiethours`）
+2. 确保设为"**关闭**"——"仅优先级"或"仅闹钟"模式都会拦截 Toast 横幅通知
+3. 如果需要保持专注助手开启，将 PowerShell 添加到优先级列表中
+
 **检查 Windows 通知设置**：
-1. 打开"设置" → "系统" → "通知和操作"
-2. 确保"获取来自应用和其他发送者的通知"已开启
-3. 允许 PowerShell 或 Windows Script Host 显示通知
+1. 打开"设置" → "系统" → "通知和操作"（或运行 `start ms-settings:notifications`）
+2. 确保"**获取来自应用和其他发送者的通知**"已**开启**
+3. 向下滚动找到 **PowerShell**，点击进入
+4. 确保"**通知**"开关已开启
+5. 确保"**在通知中心显示横幅**"已开启
 
 ### 问题 2：通知显示但点击后键盘错乱
 

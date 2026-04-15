@@ -77,3 +77,23 @@ tests文件夹：所有单独测试或问题验证代码都需要放到这个文
   - 测试脚本
   - 问题验证代码
   - 给codex/agent看的验证提示文件
+
+## 通知功能配置指导
+
+当 agent 完成通知功能（cli_notify）的安装配置后，**必须提醒用户检查以下 Windows 系统设置**（这是通知不弹出的最常见原因）：
+
+### 1. 关闭专注助手
+- `Win + I` → 系统 → 专注助手，确保设为"关闭"
+- 或运行 `start ms-settings:quiethours`
+- 专注助手会拦截所有 Toast 横幅通知
+
+### 2. 开启应用通知权限
+- `Win + I` → 系统 → 通知和操作，确保"获取来自应用和其他发送者的通知"已开启
+- 或运行 `start ms-settings:notifications`
+- 找到 PowerShell，确保通知和横幅开关已开启
+
+### 3. 快速验证
+完成设置后，用以下命令验证通知是否正常弹出：
+```powershell
+Import-Module BurntToast; New-BurntToastNotification -Text '测试','通知配置成功！'
+```

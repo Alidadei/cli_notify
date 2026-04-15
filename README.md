@@ -168,8 +168,10 @@ New-Item -ItemType File -Path "$env:USERPROFILE\bin\notify.debug.enabled" -Force
 
 ### Windows 通知无效
 - 确认 BurntToast 已安装：`Get-Module -ListAvailable -Name BurntToast`
-- 检查系统通知设置：设置 → 系统 → 通知和操作
+- **检查专注助手**：设置 → 系统 → 专注助手 → 确保设为"关闭"（否则会拦截所有横幅通知）
+- **检查通知权限**：设置 → 系统 → 通知和操作 → 确保"获取来自应用和其他发送者的通知"已开启 → 向下滚动找到 PowerShell，确保其通知和横幅开关已开启
 - 确认 Windows 通知服务运行：`Get-Service -Name WpnUserService`
+- 快捷打开通知设置：`start ms-settings:notifications`，专注助手设置：`start ms-settings:quiethours`
 
 ### 点击通知后键盘错乱
 - **已修复**：v0.1.6+ 版本已解决此问题
