@@ -17,14 +17,39 @@ Add-Type -Namespace Win32 -Name WF -ErrorAction SilentlyContinue -MemberDefiniti
 
 function Find-ClaudeWindow {
   try {
-    # Prefer: cmd.exe with "Claude" in title
+    # Find all cmd.exe with "Claude" in title and visible window
     $procs = Get-Process -Name cmd -ErrorAction SilentlyContinue |
       Where-Object { $_.MainWindowHandle -ne [IntPtr]::Zero -and $_.MainWindowTitle -match 'Claude' }
-    if ($procs) { return $procs[0].MainWindowHandle }
+
+    if ($procs) {
+      # If multiple Claude Code windows, find the most recently active one
+      if ($procs.Count -gt 1) {
+        # Get current foreground window
+        $fgWnd = [Win32.WF]::GetForegroundWindow()
+        # Check if foreground window is a Claude Code window
+        $fgProc = $procs | Where-Object { $_.MainWindowHandle -eq $fgWnd }
+        if ($fgProc) {
+          return $fgProc[0].MainWindowHandle
+        }
+        # If foreground is not Claude Code, find the one with latest activity
+        # Use the one with most recent CPU time as a heuristic
+        $mostActive = $procs | Sort-Object { -($_.CPU) } | Select-Object -First 1
+        return $mostActive.MainWindowHandle
+      }
+      return $procs[0].MainWindowHandle
+    }
+
     # Fallback: any cmd.exe with a visible window
     $procs = Get-Process -Name cmd -ErrorAction SilentlyContinue |
       Where-Object { $_.MainWindowHandle -ne [IntPtr]::Zero }
-    if ($procs) { return $procs[0].MainWindowHandle }
+    if ($procs) {
+      if ($procs.Count -gt 1) {
+        # Return the one with most recent CPU time
+        $mostActive = $procs | Sort-Object { -($_.CPU) } | Select-Object -First 1
+        return $mostActive.MainWindowHandle
+      }
+      return $procs[0].MainWindowHandle
+    }
   } catch {}
   return [IntPtr]::Zero
 }
