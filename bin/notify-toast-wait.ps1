@@ -17,38 +17,38 @@ Add-Type -Namespace Win32 -Name WF -ErrorAction SilentlyContinue -MemberDefiniti
 
 function Find-ClaudeWindow {
   try {
-    # Find all cmd.exe with "Claude" in title and visible window
-    $procs = Get-Process -Name cmd -ErrorAction SilentlyContinue |
-      Where-Object { $_.MainWindowHandle -ne [IntPtr]::Zero -and $_.MainWindowTitle -match 'Claude' }
-
-    if ($procs) {
-      # If multiple Claude Code windows, find the most recently active one
-      if ($procs.Count -gt 1) {
-        # Get current foreground window
-        $fgWnd = [Win32.WF]::GetForegroundWindow()
-        # Check if foreground window is a Claude Code window
-        $fgProc = $procs | Where-Object { $_.MainWindowHandle -eq $fgWnd }
-        if ($fgProc) {
-          return $fgProc[0].MainWindowHandle
-        }
-        # If foreground is not Claude Code, find the one with latest activity
-        # Use the one with most recent CPU time as a heuristic
-        $mostActive = $procs | Sort-Object { -($_.CPU) } | Select-Object -First 1
-        return $mostActive.MainWindowHandle
+    # Strategy 1: Walk own process tree to find cmd.exe ancestor (deterministic)
+    $walkPid = $PID
+    for ($depth = 0; $depth -lt 10; $depth++) {
+      $cim = Get-CimInstance Win32_Process -Filter "ProcessId=$walkPid" -ErrorAction SilentlyContinue
+      if (-not $cim) { break }
+      $ppid = $cim.ParentProcessId
+      if (-not $ppid -or $ppid -eq $walkPid) { break }
+      $pp = Get-Process -Id $ppid -ErrorAction SilentlyContinue
+      if ($pp -and $pp.ProcessName -eq 'cmd' -and $pp.MainWindowHandle -ne [IntPtr]::Zero) {
+        return $pp.MainWindowHandle
       }
-      return $procs[0].MainWindowHandle
+      $walkPid = $ppid
     }
 
-    # Fallback: any cmd.exe with a visible window
+    # Strategy 2: Single Claude-titled cmd window
+    $procs = Get-Process -Name cmd -ErrorAction SilentlyContinue |
+      Where-Object { $_.MainWindowHandle -ne [IntPtr]::Zero -and $_.MainWindowTitle -match 'Claude' }
+    if ($procs) {
+      if ($procs.Count -eq 1) { return $procs[0].MainWindowHandle }
+      # Multiple: prefer foreground, then most CPU
+      $fgWnd = [Win32.WF]::GetForegroundWindow()
+      $fgProc = $procs | Where-Object { $_.MainWindowHandle -eq $fgWnd }
+      if ($fgProc) { return $fgProc[0].MainWindowHandle }
+      return ($procs | Sort-Object { -($_.CPU) } | Select-Object -First 1).MainWindowHandle
+    }
+
+    # Strategy 3: Any visible cmd window
     $procs = Get-Process -Name cmd -ErrorAction SilentlyContinue |
       Where-Object { $_.MainWindowHandle -ne [IntPtr]::Zero }
     if ($procs) {
-      if ($procs.Count -gt 1) {
-        # Return the one with most recent CPU time
-        $mostActive = $procs | Sort-Object { -($_.CPU) } | Select-Object -First 1
-        return $mostActive.MainWindowHandle
-      }
-      return $procs[0].MainWindowHandle
+      if ($procs.Count -eq 1) { return $procs[0].MainWindowHandle }
+      return ($procs | Sort-Object { -($_.CPU) } | Select-Object -First 1).MainWindowHandle
     }
   } catch {}
   return [IntPtr]::Zero
