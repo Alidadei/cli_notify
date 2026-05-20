@@ -1,6 +1,6 @@
-# Claude Code 通知功能配置指南
+# 手动安装详解
 
-> 本指南基于 **cli_notify** 项目，一个 Windows CLI 通知桥接工具。
+> 本文档是 **cli_notify** 的手动安装详解，适合不使用一键脚本、希望逐步手工配置的场景。
 > 项目地址：`https://github.com/<your-repo>/cli_notify`
 
 ## 功能说明
@@ -135,7 +135,7 @@ cli_notify/
 │   ├── telegram-bridge.ps1/vbs
 │   └── ... (其他功能脚本)
 ├── docs/                      # 文档目录
-│   ├── installation-guide.md
+│   ├── manual-installation-guide.md
 │   ├── troubleshooting-toast-notification-issues.md
 │   ├── bug-toast-click-keyboard-malfunction.md
 │   └── performance-analysis.md
@@ -262,6 +262,17 @@ Get-Module -ListAvailable -Name BurntToast
 ```json
 {
   "hooks": {
+    "Notification": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "& 'C:\\Users\\<用户名>\\bin\\notify.ps1' -Source 'Claude'",
+            "shell": "powershell"
+          }
+        ]
+      }
+    ],
     "Stop": [
       {
         "hooks": [
@@ -292,6 +303,17 @@ Get-Module -ListAvailable -Name BurntToast
     "github@claude-plugins-official": true
   },
   "hooks": {
+    "Notification": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "& 'C:\\Users\\yourname\\bin\\notify.ps1' -Source 'Claude'",
+            "shell": "powershell"
+          }
+        ]
+      }
+    ],
     "Stop": [
       {
         "hooks": [

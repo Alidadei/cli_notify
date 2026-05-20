@@ -248,6 +248,42 @@ function Get-ProjectPath {
   try { return (Get-Location).Path } catch { return "unknown" }
 }
 
+function Get-HookEventName {
+  param($p)
+  if (-not $p) { return $null }
+  foreach ($k in @("hook_event_name","hookEventName","event_name","eventName")) {
+    if ($p.$k) { return [string]$p.$k }
+  }
+  return $null
+}
+
+function Get-NotificationTitle {
+  param($p)
+  if (-not $p) { return $null }
+  foreach ($k in @("title","notification_title","notificationTitle")) {
+    if ($p.$k) { return [string]$p.$k }
+  }
+  return $null
+}
+
+function Get-NotificationMessage {
+  param($p)
+  if (-not $p) { return $null }
+  foreach ($k in @("message","body","notification_message","notificationMessage")) {
+    if ($p.$k) { return [string]$p.$k }
+  }
+  return $null
+}
+
+function Get-NotificationType {
+  param($p)
+  if (-not $p) { return $null }
+  foreach ($k in @("notification_type","notificationType")) {
+    if ($p.$k) { return [string]$p.$k }
+  }
+  return $null
+}
+
 function Get-HostName {
   param($p)
   if ($p) {
@@ -404,6 +440,9 @@ $sessionId = Get-SessionId -p $payload
 $projectPath = Get-ProjectPath -p $payload
 $endTime = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
 Update-SessionMap -sessionId $sessionId -projectPath $projectPath -source $Source -time $endTime
+$hookEventName = Get-HookEventName -p $payload
+$notificationType = Get-NotificationType -p $payload
+$notificationMessage = Get-NotificationMessage -p $payload
 
 $maxReply = 0  # 0 = no truncation
 try {
@@ -411,13 +450,32 @@ try {
   if ($v) { $maxReply = [int]$v }
 } catch {}
 
-$rawSnippet = Get-LastAssistantText -p $payload
+$rawSnippet = $null
+if ($hookEventName -eq "Notification") {
+  $rawSnippet = $notificationMessage
+} else {
+  $rawSnippet = Get-LastAssistantText -p $payload
+}
 $snippet = Normalize-Reply -text $rawSnippet -max $maxReply
 
+# If no meaningful reply, use project name as brief status (zero overhead)
+if (-not $snippet -or $snippet -eq "(无内容)") {
+  $pName = if ($projectPath) { Split-Path -Leaf $projectPath } else { $null }
+  $snippet = if ($pName) { "$pName 已完成" } else { "任务已完成" }
+}
+
 if ($payload) {
-  if ($Source -match 'Codex') { $Title = "Codex 已回复" }
-  elseif ($Source -match 'Claude') { $Title = "Claude 已回复" }
-  elseif (-not $Title) { $Title = "$Source 已回复" }
+  if ($hookEventName -eq "Notification") {
+    $payloadTitle = Get-NotificationTitle -p $payload
+    if ($payloadTitle) { $Title = $payloadTitle }
+    elseif ($Source -match 'Claude') { $Title = "Claude 需要你的处理" }
+    elseif ($Source -match 'Codex') { $Title = "Codex 需要你的处理" }
+    elseif (-not $Title) { $Title = "$Source 需要你的处理" }
+  } else {
+    if ($Source -match 'Codex') { $Title = "Codex 已回复" }
+    elseif ($Source -match 'Claude') { $Title = "Claude 已回复" }
+    elseif (-not $Title) { $Title = "$Source 已回复" }
+  }
 } else {
   if (-not $Title -or $Title -match '^\s*[{[]' -or $Title -match '"type"\s*:') {
     if ($Source -match 'Codex') { $Title = "Codex 已回复" }
@@ -442,11 +500,36 @@ $hostLine = $null
 if ($hostName) { $hostLine = "主机: $hostName" }
 
 $bodyLines = @()
-if ($hostLine) { $bodyLines += $hostLine }
-$bodyLines += "会话ID: $sessionId"
-$bodyLines += "项目: $projectPath"
-$bodyLines += "结束: $endTime"
-$bodyLines += "回复: $snippet"
+if ($hookEventName -eq "Notification") {
+  if ($hostLine) { $bodyLines += $hostLine }
+  $bodyLines += "会话ID: $sessionId"
+  $bodyLines += "项目: $projectPath"
+  $bodyLines += "时间: $endTime"
+  if ($notificationType) { $bodyLines += "类型: $notificationType" }
+  if ($notificationMessage) { $bodyLines += ("提示: " + $notificationMessage.Trim()) }
+  if ($bodyLines.Count -eq 0 -and $snippet) { $bodyLines += $snippet }
+} else {
+  if ($hostLine) { $bodyLines += $hostLine }
+  $bodyLines += "会话ID: $sessionId"
+  $bodyLines += "项目: $projectPath"
+  $bodyLines += "结束: $endTime"
+
+  # Only include reply content if it's meaningful (not "(无内容)")
+  if ($snippet -and $snippet -ne "(无内容)") {
+    $bodyLines += "回复: $snippet"
+  }
+
+  # If no meaningful content, add a brief status instead
+  if (-not $snippet -or $snippet -eq "(无内容)") {
+    $projectName = Split-Path -Leaf $projectPath
+    if ($projectName) {
+      $bodyLines += "状态: $projectName 已完成"
+    } else {
+      $bodyLines += "状态: 任务已完成"
+    }
+  }
+}
+
 $Body = $bodyLines -join "`n"
 
 Write-NotifyLog -Channel "invoke" -Status "ok" -Message "$Source"
@@ -464,11 +547,22 @@ if (Test-Path $flagWin) {
       if ($params -contains 'ActivatedAction' -and (Test-Path $script:toastWaitScript)) {
         # Show toast via background process that handles click-to-focus
         $script:toastActivated = $true
-        # Get current console window handle for reliable focus
+        # Walk process tree to find the cmd.exe ancestor window (deterministic, no guessing)
         $consoleWnd = "0"
         try {
-          Add-Type -Namespace Win32Helper -Name Console -ErrorAction SilentlyContinue -MemberDefinition '[DllImport("kernel32.dll")] public static extern IntPtr GetConsoleWindow();'
-          $consoleWnd = [Win32Helper.Console]::GetConsoleWindow().ToString()
+          $walkPid = $PID
+          for ($depth = 0; $depth -lt 10; $depth++) {
+            $cim = Get-CimInstance Win32_Process -Filter "ProcessId=$walkPid" -ErrorAction SilentlyContinue
+            if (-not $cim) { break }
+            $ppid = $cim.ParentProcessId
+            if (-not $ppid -or $ppid -eq $walkPid) { break }
+            $pp = Get-Process -Id $ppid -ErrorAction SilentlyContinue
+            if ($pp -and $pp.ProcessName -eq 'cmd' -and $pp.MainWindowHandle -ne [IntPtr]::Zero) {
+              $consoleWnd = $pp.MainWindowHandle.ToString()
+              break
+            }
+            $walkPid = $ppid
+          }
         } catch {}
         $vbsPath = Join-Path $PSScriptRoot "notify-toast-wait.vbs"
         Write-NotifyLog -Channel "debug" -Status "info" -Message "Title='$Title' SnippetLength=$($snippet.Length) hWnd=$consoleWnd"

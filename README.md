@@ -21,18 +21,51 @@
 
 ## 🚀 快速开始
 
-### 方式 1：使用安装向导（推荐）
+### 方式 1：使用安装向导（适合成品安装 / 普通用户）
 
 1. 在 [GitHub Releases](../../releases) 下载最新 `NotifySetup.exe`
 2. 双击运行安装向导
 3. 按需勾选：Telegram/企业微信/远程通知服务端/开机自启
 4. 安装完成即可使用
 
-> 安装向导会自动处理端口冲突、防火墙配置、URL ACL 等复杂设置。
+> 安装向导适合快速安装和分发给其他人使用，但安装后通常不会直接修改底层通知脚本。
 
-### 方式 2：手动配置
+### 方式 2：克隆仓库后一键安装（推荐给需要自定义通知效果的用户）
+
+适合已经在本机使用 Claude / Codex，并希望直接从仓库完成配置、保留源码级可修改能力的场景。
+
+```powershell
+.\setup-windows.ps1
+```
+
+也可以直接双击：
+
+```text
+setup-windows.cmd
+```
+
+这个 bootstrap 会自动完成：
+
+- 复制 `bin/*.ps1` 和 `bin/*.vbs` 到 `%USERPROFILE%\bin`
+- 初始化 `%USERPROFILE%\bin\.env`
+- 配置 Claude 的 `Stop + Notification` hooks
+- 配置 Codex 的 `notify`
+- 开启 `NotifyTray` 和 `CodexWatch` 开机自启
+- 立即启动 tray 和 watcher
+- 发送测试通知
+- 在安装结束后自动验收，失败时明确报错
+
+说明：
+
+- 只使用本地 Windows 通知时，不需要额外填写任何 secret
+- 脚本会尝试安装 `BurntToast`，但它不是硬前置；安装失败时会自动回退到原生 Windows toast
+- 安装完成后仍可直接编辑 `bin/notify.ps1`、`bin/codex-watch.ps1`、`bin/notify-tray.ps1` 等脚本，自定义通知标题、正文、渠道和 watcher 行为
+
+### 方式 3：手动配置
 
 #### 1. 安装 BurntToast 模块
+
+`BurntToast` 是推荐依赖，不是硬前置；如果未安装，`notify.ps1` 仍会尝试使用原生 Windows toast。
 
 ```powershell
 Install-Module -Name BurntToast -Force -Scope CurrentUser
@@ -58,6 +91,17 @@ Copy-Item "bin\*.vbs" -Destination "$env:USERPROFILE\bin\" -Force
 ```json
 {
   "hooks": {
+    "Notification": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "& 'C:\\Users\\<用户名>\\bin\\notify.ps1' -Source 'Claude'",
+            "shell": "powershell"
+          }
+        ]
+      }
+    ],
     "Stop": [
       {
         "hooks": [
@@ -73,6 +117,10 @@ Copy-Item "bin\*.vbs" -Destination "$env:USERPROFILE\bin\" -Force
 }
 ```
 
+`Notification` 用于 Claude 需要你授权或等待你输入时的通知，`Stop` 用于正常回复完成后的通知。
+
+Codex 中途等待你授权或输入时的提醒由 `codex-watch.ps1` 提供；可直接运行 `& "$env:USERPROFILE\bin\codex-watch.ps1"`，或通过 `notify-restart.ps1` 一并启动。
+
 #### 4. 验证配置
 
 ```powershell
@@ -83,7 +131,7 @@ Copy-Item "bin\*.vbs" -Destination "$env:USERPROFILE\bin\" -Force
 
 ## 📖 详细文档
 
-- [安装配置指南](docs/installation-guide.md) - 完整的安装步骤和配置说明
+- [手动安装详解](docs/manual-installation-guide.md) - 不走一键脚本时的完整手动安装与配置说明
 - [问题排查指南](docs/troubleshooting-toast-notification-issues.md) - 常见问题和解决方案
 - [性能分析报告](docs/performance-analysis.md) - 资源占用和优化说明
 - [键盘错乱问题分析](docs/bug-toast-click-keyboard-malfunction.md) - 技术细节
@@ -165,6 +213,15 @@ New-Item -ItemType File -Path "$env:USERPROFILE\bin\notify.debug.enabled" -Force
 ```
 
 ## 🔍 常见问题
+
+### 新机器需要额外下载 BurntToast 才能运行吗？
+- 不需要手动先下载；`setup-windows.ps1` 会自动尝试安装
+- 即使没有 `BurntToast`，本地 Windows 通知仍可回退到原生 toast
+- 如果你想完整启用推荐路径，再检查：`Get-Module -ListAvailable -Name BurntToast`
+
+### 本地通知需要填写 secret 吗？
+- 不需要；本机 Claude / Codex 到 Windows toast 这条链路不依赖 secret
+- 只有企业微信、Telegram、远程 Linux → Windows 这类附加通道才需要填写 `.env`
 
 ### Windows 通知无效
 - 确认 BurntToast 已安装：`Get-Module -ListAvailable -Name BurntToast`
