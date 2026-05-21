@@ -264,6 +264,19 @@ Get-Module -ListAvailable -Name BurntToast
   "hooks": {
     "Notification": [
       {
+        "matcher": "permission_prompt|idle_prompt",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "& 'C:\\Users\\<用户名>\\bin\\notify.ps1' -Source 'Claude'",
+            "shell": "powershell"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "AskUserQuestion",
         "hooks": [
           {
             "type": "command",
@@ -294,6 +307,10 @@ Get-Module -ListAvailable -Name BurntToast
 - 路径中的反斜杠需要转义为 `\\`
 
 **完整配置示例**：
+示例中的脚本路径请替换为 `C:\Users\<用户名>\bin\notify.ps1`。
+要想在 Claude 主动提问时立即收到提醒，必须配置带 `matcher: "AskUserQuestion"` 的 `PreToolUse` hook。
+要想只在 Claude 需要授权或长时间等待你处理时才走 `Notification`，请把它的 matcher 配成 `permission_prompt|idle_prompt`。
+
 ```json
 {
   "env": {
@@ -305,6 +322,19 @@ Get-Module -ListAvailable -Name BurntToast
   "hooks": {
     "Notification": [
       {
+        "matcher": "permission_prompt|idle_prompt",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "& 'C:\\Users\\yourname\\bin\\notify.ps1' -Source 'Claude'",
+            "shell": "powershell"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "AskUserQuestion",
         "hooks": [
           {
             "type": "command",

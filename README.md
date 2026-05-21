@@ -48,7 +48,7 @@ setup-windows.cmd
 
 - 复制 `bin/*.ps1` 和 `bin/*.vbs` 到 `%USERPROFILE%\bin`
 - 初始化 `%USERPROFILE%\bin\.env`
-- 配置 Claude 的 `Stop + Notification` hooks
+- 配置 Claude 的 `Stop + Notification(permission_prompt|idle_prompt) + PreToolUse(AskUserQuestion)` hooks
 - 配置 Codex 的 `notify`
 - 开启 `NotifyTray` 和 `CodexWatch` 开机自启
 - 立即启动 tray 和 watcher
@@ -88,11 +88,27 @@ Copy-Item "bin\*.vbs" -Destination "$env:USERPROFILE\bin\" -Force
 
 编辑 `C:\Users\<用户名>\.claude\settings.json`，添加以下配置：
 
+示例中的脚本路径请替换为 `C:\Users\<用户名>\bin\notify.ps1`。
+要想在 Claude 主动提问时立即收到提醒，必须配置带 `matcher: "AskUserQuestion"` 的 `PreToolUse` hook。
+
 ```json
 {
   "hooks": {
     "Notification": [
       {
+        "matcher": "permission_prompt|idle_prompt",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "& 'C:\\Users\\<用户名>\\bin\\notify.ps1' -Source 'Claude'",
+            "shell": "powershell"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "AskUserQuestion",
         "hooks": [
           {
             "type": "command",
@@ -117,7 +133,7 @@ Copy-Item "bin\*.vbs" -Destination "$env:USERPROFILE\bin\" -Force
 }
 ```
 
-`Notification` 用于 Claude 需要你授权或等待你输入时的通知，`Stop` 用于正常回复完成后的通知。
+`PreToolUse` 中 `matcher` 为 `AskUserQuestion` 的 hook 用于 Claude 立即向你提问时的通知，`Notification` 中 `matcher` 为 `permission_prompt|idle_prompt` 的 hook 用于 Claude 需要你授权或长时间等待你处理时的通知，`Stop` 用于正常回复完成后的通知。
 
 Codex 中途等待你授权或输入时的提醒由 `codex-watch.ps1` 提供；可直接运行 `& "$env:USERPROFILE\bin\codex-watch.ps1"`，或通过 `notify-restart.ps1` 一并启动。
 

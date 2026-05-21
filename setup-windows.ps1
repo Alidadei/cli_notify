@@ -80,8 +80,11 @@ function Normalize-ClaudeHookCommand {
 }
 
 function New-ClaudeHookGroup {
-  param([string]$Command)
-  return [pscustomobject]@{
+  param(
+    [string]$Command,
+    [string]$Matcher
+  )
+  $group = [pscustomobject]@{
     hooks = @(
       [pscustomobject]@{
         type = "command"
@@ -90,6 +93,10 @@ function New-ClaudeHookGroup {
       }
     )
   }
+  if ($Matcher) {
+    $group | Add-Member -NotePropertyName matcher -NotePropertyValue $Matcher
+  }
+  return $group
 }
 
 function Test-ClaudeHookExists {
@@ -107,6 +114,56 @@ function Test-ClaudeHookExists {
     }
   }
   return $false
+}
+
+function Test-ClaudeMatchedHookExists {
+  param(
+    [object[]]$Groups,
+    [string]$Command,
+    [string]$Matcher
+  )
+  foreach ($group in @($Groups)) {
+    if (-not $group) { continue }
+    if ([string]$group.matcher -ne $Matcher) { continue }
+    if (Test-ClaudeHookExists -Groups @($group) -Command $Command) {
+      return $true
+    }
+  }
+  return $false
+}
+
+function Remove-ClaudeHookCommandFromGroups {
+  param(
+    [object[]]$Groups,
+    [string]$Command
+  )
+  $normalizedTarget = Normalize-ClaudeHookCommand -Command $Command
+  $result = @()
+
+  foreach ($group in @($Groups)) {
+    if (-not $group) { continue }
+
+    $remainingHooks = @()
+    foreach ($hook in @($group.hooks)) {
+      $normalizedCurrent = Normalize-ClaudeHookCommand -Command ([string]$hook.command)
+      $matchesTarget = ($hook.type -eq "command" -and $hook.shell -eq "powershell" -and $normalizedCurrent -eq $normalizedTarget)
+      if (-not $matchesTarget) {
+        $remainingHooks += $hook
+      }
+    }
+
+    if ($remainingHooks.Count -eq 0) { continue }
+
+    $cleanGroup = [pscustomobject]@{
+      hooks = @($remainingHooks)
+    }
+    if ($group.PSObject.Properties["matcher"]) {
+      $cleanGroup | Add-Member -NotePropertyName matcher -NotePropertyValue $group.matcher
+    }
+    $result += $cleanGroup
+  }
+
+  return @($result)
 }
 
 function Install-BurntToastModule {
@@ -301,11 +358,12 @@ function Invoke-SetupVerification {
       try {
         $settings = Get-Content -LiteralPath $settingsPath -Raw | ConvertFrom-Json
         $stopOk = Test-ClaudeHookExists -Groups @($settings.hooks.Stop) -Command $expectedCommand
-        $notificationOk = Test-ClaudeHookExists -Groups @($settings.hooks.Notification) -Command $expectedCommand
-        if ($stopOk -and $notificationOk) {
+        $notificationOk = Test-ClaudeMatchedHookExists -Groups @($settings.hooks.Notification) -Command $expectedCommand -Matcher "permission_prompt|idle_prompt"
+        $askUserQuestionOk = Test-ClaudeMatchedHookExists -Groups @($settings.hooks.PreToolUse) -Command $expectedCommand -Matcher "AskUserQuestion"
+        if ($stopOk -and $notificationOk -and $askUserQuestionOk) {
           Add-VerifyResult -Results $results -Check "Claude hooks" -Status "PASS" -Detail $settingsPath
         } else {
-          Add-VerifyResult -Results $results -Check "Claude hooks" -Status "FAIL" -Detail "Stop or Notification hook is missing."
+          Add-VerifyResult -Results $results -Check "Claude hooks" -Status "FAIL" -Detail "Stop, Notification(permission_prompt|idle_prompt), or PreToolUse(AskUserQuestion) hook is missing."
         }
       } catch {
         Add-VerifyResult -Results $results -Check "Claude hooks" -Status "FAIL" -Detail $_.Exception.Message
@@ -431,15 +489,29 @@ function Configure-ClaudeHooks {
 
   $command = "& '" + $NotifyScriptPath + "' -Source 'Claude'"
 
-  foreach ($eventName in @("Stop", "Notification")) {
+  $hookSpecs = @(
+    @{ EventName = "Stop"; Matchers = @("") },
+    @{ EventName = "Notification"; Matchers = @("permission_prompt|idle_prompt") },
+    @{ EventName = "PreToolUse"; Matchers = @("AskUserQuestion") }
+  )
+
+  foreach ($spec in $hookSpecs) {
+    $eventName = [string]$spec.EventName
     $existing = $settings.hooks.PSObject.Properties[$eventName]
-    if (-not $existing -or -not $existing.Value) {
-      $settings.hooks | Add-Member -NotePropertyName $eventName -NotePropertyValue @((New-ClaudeHookGroup -Command $command))
-      continue
+    $groups = if ($existing -and $existing.Value) { @($existing.Value) } else { @() }
+    $cleanGroups = Remove-ClaudeHookCommandFromGroups -Groups $groups -Command $command
+
+    $desiredGroups = @()
+    foreach ($matcher in @($spec.Matchers)) {
+      $desiredMatcher = if ([string]::IsNullOrWhiteSpace([string]$matcher)) { $null } else { [string]$matcher }
+      $desiredGroups += New-ClaudeHookGroup -Command $command -Matcher $desiredMatcher
     }
 
-    if (-not (Test-ClaudeHookExists -Groups @($existing.Value) -Command $command)) {
-      $settings.hooks.$eventName = @($existing.Value) + @((New-ClaudeHookGroup -Command $command))
+    $updatedGroups = @($cleanGroups) + @($desiredGroups)
+    if (-not $existing) {
+      $settings.hooks | Add-Member -NotePropertyName $eventName -NotePropertyValue $updatedGroups
+    } else {
+      $settings.hooks.$eventName = $updatedGroups
     }
   }
 

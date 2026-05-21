@@ -88,6 +88,8 @@ $debugEnabled = Test-Path $flagDebug
 # Log setup (keep only 1 day) if debug enabled
 $logDir = Join-Path $env:LOCALAPPDATA "notify"
 $logFile = Join-Path $logDir ("notify-" + (Get-Date -Format 'yyyyMMdd') + ".log")
+$stateFile = Join-Path $logDir "session-map.json"
+$tgMapFile = Join-Path $logDir "telegram-map.json"
 if ($debugEnabled) {
   try { if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null } } catch {}
   try {
@@ -95,6 +97,17 @@ if ($debugEnabled) {
       Where-Object { $_.LastWriteTime -lt (Get-Date).Date.AddDays(-1) } |
       Remove-Item -Force -ErrorAction SilentlyContinue
   } catch {}
+}
+
+function Ensure-NotifyStateDir {
+  try {
+    if (-not (Test-Path -LiteralPath $logDir)) {
+      New-Item -ItemType Directory -Path $logDir -Force | Out-Null
+    }
+    return $true
+  } catch {
+    return $false
+  }
 }
 
 function Write-NotifyLog {
@@ -166,6 +179,94 @@ if ($payloadJson) {
       if ($extracted) { $payload = $extracted | ConvertFrom-Json }
     } catch {}
   }
+}
+
+function Get-TranscriptPath {
+  param($p)
+  if (-not $p) { return $null }
+  foreach ($k in @("transcript_path","transcriptPath")) {
+    if ($p.$k) { return [string]$p.$k }
+  }
+  return $null
+}
+
+function Get-TranscriptToolUseIds {
+  param($content, [string]$toolName)
+  $ids = @()
+  foreach ($block in @($content)) {
+    if (-not $block) { continue }
+    if ($block.type -ne "tool_use") { continue }
+    if ($toolName -and [string]$block.name -ne $toolName) { continue }
+    if ($block.id) { $ids += [string]$block.id }
+  }
+  return $ids
+}
+
+function Get-TranscriptToolResultIds {
+  param($content)
+  $ids = @()
+  foreach ($block in @($content)) {
+    if (-not $block) { continue }
+    if ($block.type -ne "tool_result") { continue }
+    if ($block.tool_use_id) { $ids += [string]$block.tool_use_id }
+  }
+  return $ids
+}
+
+function Test-TranscriptHasPendingAskUserQuestion {
+  param([string]$TranscriptPath)
+  if ([string]::IsNullOrWhiteSpace($TranscriptPath)) { return $false }
+  if (-not (Test-Path -LiteralPath $TranscriptPath)) { return $false }
+
+  try {
+    $lines = @(Get-Content -LiteralPath $TranscriptPath -Tail 400 -ErrorAction Stop)
+  } catch {
+    return $false
+  }
+
+  if ($lines.Count -eq 0) { return $false }
+
+  $pending = @{}
+  foreach ($line in $lines) {
+    if ([string]::IsNullOrWhiteSpace($line)) { continue }
+
+    $item = $null
+    try { $item = $line | ConvertFrom-Json -ErrorAction Stop } catch { continue }
+    if (-not $item -or -not $item.message -or -not $item.message.content) { continue }
+
+    $role = [string]$item.message.role
+    if ($role -eq "assistant") {
+      foreach ($toolUseId in @(Get-TranscriptToolUseIds -content $item.message.content -toolName "AskUserQuestion")) {
+        if ($toolUseId) { $pending[$toolUseId] = $true }
+      }
+      continue
+    }
+
+    if ($role -eq "user") {
+      foreach ($toolResultId in @(Get-TranscriptToolResultIds -content $item.message.content)) {
+        if ($toolResultId -and $pending.ContainsKey($toolResultId)) {
+          [void]$pending.Remove($toolResultId)
+        }
+      }
+    }
+  }
+
+  return ($pending.Count -gt 0)
+}
+
+function Test-ShouldSuppressNotification {
+  param($p)
+  if (-not $p) { return $false }
+
+  $hookEventName = Get-HookEventName -p $p
+  if ($hookEventName -ne "Notification") { return $false }
+
+  $transcriptPath = Get-TranscriptPath -p $p
+  if (Test-TranscriptHasPendingAskUserQuestion -TranscriptPath $transcriptPath) { return $true }
+
+  $sessionId = Get-SessionId -p $p
+  if (-not (Test-SessionHasRecentAskUserQuestion -sessionId $sessionId)) { return $false }
+  return (Test-NotificationLooksLikeAskFollowUp -p $p)
 }
 
 function Get-TextFromContent {
@@ -284,6 +385,90 @@ function Get-NotificationType {
   return $null
 }
 
+function Get-ToolName {
+  param($p)
+  if (-not $p) { return $null }
+  foreach ($k in @("tool_name","toolName","name")) {
+    if ($p.$k) { return [string]$p.$k }
+  }
+  return $null
+}
+
+function Get-ToolInput {
+  param($p)
+  if (-not $p) { return $null }
+  foreach ($k in @("tool_input","toolInput","input")) {
+    if ($p.$k) { return $p.$k }
+  }
+  return $null
+}
+
+function Get-AskUserQuestionItems {
+  param($p)
+  if ((Get-ToolName -p $p) -ne "AskUserQuestion") { return @() }
+  $toolInput = Get-ToolInput -p $p
+  if (-not $toolInput -or -not $toolInput.questions) { return @() }
+  try { return @($toolInput.questions) } catch { return @() }
+}
+
+function Get-AskUserQuestionSnippet {
+  param($p)
+  $questions = Get-AskUserQuestionItems -p $p
+  if ($questions.Count -eq 0) { return $null }
+
+  $parts = @()
+  foreach ($q in $questions) {
+    if (-not $q) { continue }
+    $line = $null
+    if ($q.question) { $line = ([string]$q.question).Trim() }
+    elseif ($q.header) { $line = ([string]$q.header).Trim() }
+    if (-not $line) { continue }
+
+    $options = @()
+    foreach ($opt in @($q.options)) {
+      if (-not $opt) { continue }
+      $optLabel = $null
+      if ($opt -is [string]) { $optLabel = $opt }
+      elseif ($opt.label) { $optLabel = [string]$opt.label }
+      if ($optLabel) { $options += $optLabel.Trim() }
+    }
+    if ($options.Count -gt 0) { $line += " [" + ($options -join "/") + "]" }
+    if ($q.multiSelect -eq $true) { $line += " (可多选)" }
+    $parts += $line
+  }
+
+  if ($parts.Count -eq 0) { return $null }
+  return ($parts -join " ; ")
+}
+
+function Get-AskUserQuestionLines {
+  param($p)
+  $questions = Get-AskUserQuestionItems -p $p
+  if ($questions.Count -eq 0) { return @() }
+
+  $lines = @()
+  for ($i = 0; $i -lt $questions.Count; $i++) {
+    $q = $questions[$i]
+    if (-not $q) { continue }
+    $prefix = if ($q.header) { ([string]$q.header).Trim() } else { "问题" + ($i + 1) }
+    if ($q.question) { $lines += ($prefix + ": " + ([string]$q.question).Trim()) }
+    else { $lines += $prefix }
+
+    $options = @()
+    foreach ($opt in @($q.options)) {
+      if (-not $opt) { continue }
+      $optLabel = $null
+      if ($opt -is [string]) { $optLabel = $opt }
+      elseif ($opt.label) { $optLabel = [string]$opt.label }
+      if ($optLabel) { $options += $optLabel.Trim() }
+    }
+    if ($options.Count -gt 0) { $lines += ("选项: " + ($options -join " / ")) }
+    if ($q.multiSelect -eq $true) { $lines += "可多选: 是" }
+  }
+
+  return $lines
+}
+
 function Get-HostName {
   param($p)
   if ($p) {
@@ -321,22 +506,44 @@ function Normalize-Reply {
 $script:toastActivated = $false
 $script:toastWaitScript = Join-Path $PSScriptRoot "notify-toast-wait.ps1"
 
-$stateFile = Join-Path $logDir "session-map.json"
+function Load-SessionMap {
+  if (Test-Path $stateFile) {
+    try { $state = (Get-Content -Path $stateFile -Raw) | ConvertFrom-Json } catch {}
+  }
+  if (-not $state) { $state = [pscustomobject]@{} }
+  if (-not $state.sessions) { $state | Add-Member -MemberType NoteProperty -Name sessions -Value ([pscustomobject]@{}) }
+  if (-not $state.codex) { $state | Add-Member -MemberType NoteProperty -Name codex -Value ([pscustomobject]@{}) }
+  if (-not $state.claude) { $state | Add-Member -MemberType NoteProperty -Name claude -Value ([pscustomobject]@{}) }
+  return $state
+}
+
+function Save-SessionMap {
+  param($state)
+  if (-not $state) { return }
+  if (-not (Ensure-NotifyStateDir)) { return }
+  try { $state | ConvertTo-Json -Depth 8 | Set-Content -Path $stateFile -Encoding UTF8 } catch {}
+}
+
+function Get-SessionMapEntry {
+  param($state, [string]$sessionId)
+  if (-not $state -or -not $sessionId -or $sessionId -eq "unknown") { return $null }
+  try {
+    $prop = $state.sessions.PSObject.Properties[$sessionId]
+    if ($prop) { return $prop.Value }
+  } catch {}
+  return $null
+}
+
 function Update-SessionMap {
   param([string]$sessionId, [string]$projectPath, [string]$source, [string]$time)
   if (-not $sessionId -or $sessionId -eq "unknown") { return }
   try {
-    $state = $null
-    if (Test-Path $stateFile) {
-      try { $state = (Get-Content -Path $stateFile -Raw) | ConvertFrom-Json } catch {}
-    }
-    if (-not $state) { $state = [pscustomobject]@{} }
+    $state = Load-SessionMap
+    $existing = Get-SessionMapEntry -state $state -sessionId $sessionId
+    $pendingAskTime = $null
+    if ($existing -and $existing.pendingAskTime) { $pendingAskTime = [string]$existing.pendingAskTime }
 
-    if (-not $state.sessions) { $state | Add-Member -MemberType NoteProperty -Name sessions -Value ([pscustomobject]@{}) }
-    if (-not $state.codex) { $state | Add-Member -MemberType NoteProperty -Name codex -Value ([pscustomobject]@{}) }
-    if (-not $state.claude) { $state | Add-Member -MemberType NoteProperty -Name claude -Value ([pscustomobject]@{}) }
-
-    $entry = [pscustomobject]@{ cwd = $projectPath; source = $source; time = $time }
+    $entry = [pscustomobject]@{ cwd = $projectPath; source = $source; time = $time; pendingAskTime = $pendingAskTime }
     $state.sessions | Add-Member -MemberType NoteProperty -Name $sessionId -Value $entry -Force
 
     if ($source -match 'Codex') { $state.codex = $entry }
@@ -354,10 +561,81 @@ function Update-SessionMap {
       }
     }
 
-    $state | ConvertTo-Json -Depth 6 | Set-Content -Path $stateFile -Encoding UTF8
+    Save-SessionMap -state $state
   } catch {}
 }
-$tgMapFile = Join-Path $logDir "telegram-map.json"
+
+function Set-SessionAskUserQuestionState {
+  param(
+    [string]$sessionId,
+    [bool]$Pending,
+    [string]$time
+  )
+  if (-not $sessionId -or $sessionId -eq "unknown") { return }
+  try {
+    $state = Load-SessionMap
+    $existing = Get-SessionMapEntry -state $state -sessionId $sessionId
+    $entry = if ($existing) {
+      [pscustomobject]@{
+        cwd = $existing.cwd
+        source = $existing.source
+        time = $(if ($time) { $time } elseif ($existing.time) { [string]$existing.time } else { $null })
+        pendingAskTime = $(if ($Pending) { $time } else { $null })
+      }
+    } else {
+      [pscustomobject]@{
+        cwd = $null
+        source = $null
+        time = $time
+        pendingAskTime = $(if ($Pending) { $time } else { $null })
+      }
+    }
+    $state.sessions | Add-Member -MemberType NoteProperty -Name $sessionId -Value $entry -Force
+    if ($entry.source -match 'Codex') { $state.codex = $entry }
+    elseif ($entry.source -match 'Claude') { $state.claude = $entry }
+    Save-SessionMap -state $state
+  } catch {}
+}
+
+function Test-SessionHasRecentAskUserQuestion {
+  param(
+    [string]$sessionId,
+    [int]$MaxAgeSeconds = 180
+  )
+  if (-not $sessionId -or $sessionId -eq "unknown") { return $false }
+  try {
+    $state = Load-SessionMap
+    $entry = Get-SessionMapEntry -state $state -sessionId $sessionId
+    if (-not $entry -or -not $entry.pendingAskTime) { return $false }
+    $pendingTime = [datetime]::Parse([string]$entry.pendingAskTime)
+    return (((Get-Date) - $pendingTime).TotalSeconds -le $MaxAgeSeconds)
+  } catch {
+    return $false
+  }
+}
+
+function Test-NotificationLooksLikeAskFollowUp {
+  param($p)
+  if (-not $p) { return $false }
+
+  $notificationType = [string](Get-NotificationType -p $p)
+  if ($notificationType -match '^elicitation_') { return $true }
+
+  $parts = @()
+  foreach ($value in @((Get-NotificationTitle -p $p), (Get-NotificationMessage -p $p))) {
+    if ($value) { $parts += ([string]$value).ToLowerInvariant() }
+  }
+  if ($parts.Count -eq 0) { return $false }
+
+  $text = $parts -join " "
+  return ($text -match 'waiting.+(response|reply|input|answer)' -or
+          $text -match 'awaiting.+(response|reply|input|answer)' -or
+          $text -match 'need.+(response|reply|input|answer)' -or
+          $text -match 'requires?.+(response|reply|input|answer)' -or
+          $text -match '等待.*(回复|回覆|回答|输入)' -or
+          $text -match '需要.*(回复|回覆|回答|输入)')
+}
+
 function Load-TelegramMap {
   if (Test-Path $tgMapFile) {
     try { return (Get-Content -Path $tgMapFile -Raw) | ConvertFrom-Json } catch {}
@@ -370,6 +648,7 @@ function Load-TelegramMap {
 
 function Save-TelegramMap {
   param($state)
+  if (-not (Ensure-NotifyStateDir)) { return }
   try { $state | ConvertTo-Json -Depth 8 | Set-Content -Path $tgMapFile -Encoding UTF8 } catch {}
 }
 
@@ -436,6 +715,12 @@ function Update-TelegramMap {
 
   Save-TelegramMap -state $state
 }
+
+if (Test-ShouldSuppressNotification -p $payload) {
+  Write-NotifyLog -Channel "invoke" -Status "skip" -Message "suppressed duplicate AskUserQuestion notification"
+  exit 0
+}
+
 $sessionId = Get-SessionId -p $payload
 $projectPath = Get-ProjectPath -p $payload
 $endTime = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
@@ -443,6 +728,15 @@ Update-SessionMap -sessionId $sessionId -projectPath $projectPath -source $Sourc
 $hookEventName = Get-HookEventName -p $payload
 $notificationType = Get-NotificationType -p $payload
 $notificationMessage = Get-NotificationMessage -p $payload
+$toolName = Get-ToolName -p $payload
+$isAskUserQuestion = ($hookEventName -eq "PreToolUse" -and $toolName -eq "AskUserQuestion")
+$askUserQuestionLines = @()
+if ($isAskUserQuestion) { $askUserQuestionLines = Get-AskUserQuestionLines -p $payload }
+if ($isAskUserQuestion) {
+  Set-SessionAskUserQuestionState -sessionId $sessionId -Pending $true -time $endTime
+} elseif ($hookEventName -eq "Stop") {
+  Set-SessionAskUserQuestionState -sessionId $sessionId -Pending $false -time $endTime
+}
 
 $maxReply = 0  # 0 = no truncation
 try {
@@ -451,7 +745,9 @@ try {
 } catch {}
 
 $rawSnippet = $null
-if ($hookEventName -eq "Notification") {
+if ($isAskUserQuestion) {
+  $rawSnippet = Get-AskUserQuestionSnippet -p $payload
+} elseif ($hookEventName -eq "Notification") {
   $rawSnippet = $notificationMessage
 } else {
   $rawSnippet = Get-LastAssistantText -p $payload
@@ -460,12 +756,22 @@ $snippet = Normalize-Reply -text $rawSnippet -max $maxReply
 
 # If no meaningful reply, use project name as brief status (zero overhead)
 if (-not $snippet -or $snippet -eq "(无内容)") {
-  $pName = if ($projectPath) { Split-Path -Leaf $projectPath } else { $null }
-  $snippet = if ($pName) { "$pName 已完成" } else { "任务已完成" }
+  if ($isAskUserQuestion) {
+    if ($Source -match 'Claude') { $snippet = "Claude 正在等待你的回答" }
+    elseif ($Source) { $snippet = "$Source 正在等待你的回答" }
+    else { $snippet = "等待你的回答" }
+  } else {
+    $pName = if ($projectPath) { Split-Path -Leaf $projectPath } else { $null }
+    $snippet = if ($pName) { "$pName 已完成" } else { "任务已完成" }
+  }
 }
 
 if ($payload) {
-  if ($hookEventName -eq "Notification") {
+  if ($isAskUserQuestion) {
+    if ($Source -match 'Claude') { $Title = "Claude 正在提问" }
+    elseif ($Source -match 'Codex') { $Title = "Codex 正在提问" }
+    elseif (-not $Title) { $Title = "$Source 正在提问" }
+  } elseif ($hookEventName -eq "Notification") {
     $payloadTitle = Get-NotificationTitle -p $payload
     if ($payloadTitle) { $Title = $payloadTitle }
     elseif ($Source -match 'Claude') { $Title = "Claude 需要你的处理" }
@@ -500,7 +806,16 @@ $hostLine = $null
 if ($hostName) { $hostLine = "主机: $hostName" }
 
 $bodyLines = @()
-if ($hookEventName -eq "Notification") {
+if ($isAskUserQuestion) {
+  if ($hostLine) { $bodyLines += $hostLine }
+  $bodyLines += "会话ID: $sessionId"
+  $bodyLines += "项目: $projectPath"
+  $bodyLines += "时间: $endTime"
+  foreach ($line in $askUserQuestionLines) {
+    if ($line) { $bodyLines += $line }
+  }
+  if ($askUserQuestionLines.Count -eq 0 -and $snippet) { $bodyLines += ("提示: " + $snippet) }
+} elseif ($hookEventName -eq "Notification") {
   if ($hostLine) { $bodyLines += $hostLine }
   $bodyLines += "会话ID: $sessionId"
   $bodyLines += "项目: $projectPath"
@@ -531,6 +846,7 @@ if ($hookEventName -eq "Notification") {
 }
 
 $Body = $bodyLines -join "`n"
+$channelText = if ($Title) { $Title + "`n" + $Body } else { $Body }
 
 Write-NotifyLog -Channel "invoke" -Status "ok" -Message "$Source"
 
@@ -612,13 +928,7 @@ if (Test-Path $flagWecom) {
   Write-NotifyLog -Channel "wecom" -Status "skip" -Message "disabled"
 } else {
   if ($WebhookUrl) {
-    $wecomLines = @()
-    if ($hostLine) { $wecomLines += $hostLine }
-    $wecomLines += "会话ID: $sessionId"
-    $wecomLines += "项目: $projectPath"
-    $wecomLines += "结束: $endTime"
-    $wecomLines += "回复: $snippet"
-    $content = $wecomLines -join "`n"
+    $content = $channelText
     $payloadOut = @{ msgtype = "markdown"; markdown = @{ content = $content } } | ConvertTo-Json -Depth 5
     try {
       Invoke-RestMethod -Method Post -Uri $WebhookUrl -ContentType 'application/json; charset=utf-8' -Body $payloadOut | Out-Null
@@ -636,7 +946,7 @@ if (Test-Path $flagTg) {
   Write-NotifyLog -Channel "telegram" -Status "skip" -Message "disabled"
 } else {
   if ($tgToken -and $tgChat) {
-    $tgText = if ($hostLine) { "$hostLine`n会话ID: $sessionId`n项目: $projectPath`n结束: $endTime`n回复: $snippet" } else { "会话ID: $sessionId`n项目: $projectPath`n结束: $endTime`n回复: $snippet" }
+    $tgText = $channelText
     $tgUri = "https://api.telegram.org/bot$tgToken/sendMessage"
     $tgThreadId = Get-TelegramThreadId -sessionId $sessionId
 
