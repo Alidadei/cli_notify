@@ -90,6 +90,7 @@ $logDir = Join-Path $env:LOCALAPPDATA "notify"
 $logFile = Join-Path $logDir ("notify-" + (Get-Date -Format 'yyyyMMdd') + ".log")
 $stateFile = Join-Path $logDir "session-map.json"
 $tgMapFile = Join-Path $logDir "telegram-map.json"
+$debounceFile = Join-Path $logDir "last-toast.json"
 if ($debugEnabled) {
   try { if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null } } catch {}
   try {
@@ -261,12 +262,28 @@ function Test-ShouldSuppressNotification {
   $hookEventName = Get-HookEventName -p $p
   if ($hookEventName -ne "Notification") { return $false }
 
+  # Transcript check (works when transcript path is available)
   $transcriptPath = Get-TranscriptPath -p $p
   if (Test-TranscriptHasPendingAskUserQuestion -TranscriptPath $transcriptPath) { return $true }
 
+  # Session state check
   $sessionId = Get-SessionId -p $p
-  if (-not (Test-SessionHasRecentAskUserQuestion -sessionId $sessionId)) { return $false }
-  return (Test-NotificationLooksLikeAskFollowUp -p $p)
+  if (Test-SessionHasRecentAskUserQuestion -sessionId $sessionId) { return $true }
+
+  # Debounce: suppress Notification if a toast was shown within 30 seconds
+  if (Test-Path $debounceFile) {
+    try {
+      $debounce = (Get-Content -Path $debounceFile -Raw) | ConvertFrom-Json
+      if ($debounce -and $debounce.time) {
+        $lastTime = [datetime]::Parse([string]$debounce.time)
+        $elapsed = ((Get-Date) - $lastTime).TotalSeconds
+        Write-NotifyLog -Channel "debug" -Status "debounce" -Message "elapsed=$([math]::Round($elapsed,1))s"
+        if ($elapsed -le 30) { return $true }
+      }
+    } catch {}
+  }
+
+  return $false
 }
 
 function Get-TextFromContent {
@@ -729,7 +746,18 @@ $hookEventName = Get-HookEventName -p $payload
 $notificationType = Get-NotificationType -p $payload
 $notificationMessage = Get-NotificationMessage -p $payload
 $toolName = Get-ToolName -p $payload
+
 $isAskUserQuestion = ($hookEventName -eq "PreToolUse" -and $toolName -eq "AskUserQuestion")
+
+# PreToolUse(AskUserQuestion) may not fire in some environments;
+# detect AskUserQuestion from transcript on any event
+if (-not $isAskUserQuestion) {
+  $transcriptPath = Get-TranscriptPath -p $payload
+  if (Test-TranscriptHasPendingAskUserQuestion -TranscriptPath $transcriptPath) {
+    $isAskUserQuestion = $true
+  }
+}
+
 $askUserQuestionLines = @()
 if ($isAskUserQuestion) { $askUserQuestionLines = Get-AskUserQuestionLines -p $payload }
 if ($isAskUserQuestion) {
@@ -847,6 +875,13 @@ if ($isAskUserQuestion) {
 
 $Body = $bodyLines -join "`n"
 $channelText = if ($Title) { $Title + "`n" + $Body } else { $Body }
+
+# Record debounce timestamp for Notification dedup
+try {
+  if (Ensure-NotifyStateDir) {
+    @{ time = $endTime } | ConvertTo-Json | Set-Content -Path $debounceFile -Encoding UTF8
+  }
+} catch {}
 
 Write-NotifyLog -Channel "invoke" -Status "ok" -Message "$Source"
 
