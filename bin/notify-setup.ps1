@@ -481,6 +481,12 @@ $cbAutoTray.AutoSize = $true
 $cbAutoTray.Location = New-Object System.Drawing.Point(16, 32)
 $cbAutoTray.Checked = $true
 
+$cbAutoWatch = New-Object System.Windows.Forms.CheckBox
+$cbAutoWatch.Text = "Codex 监控"
+$cbAutoWatch.AutoSize = $true
+$cbAutoWatch.Location = New-Object System.Drawing.Point(140, 32)
+$cbAutoWatch.Checked = $true
+
 $cbAutoServer = New-Object System.Windows.Forms.CheckBox
 $cbAutoServer.Text = "远程通知服务端"
 $cbAutoServer.AutoSize = $true
@@ -492,7 +498,7 @@ $lblAutoTg.Text = "Telegram Bridge：随 Telegram 配置自动开启"
 $lblAutoTg.AutoSize = $true
 $lblAutoTg.Location = New-Object System.Drawing.Point(200, 34)
 
-$gbAuto.Controls.AddRange(@($cbAutoTray,$lblAutoTg,$cbAutoServer))
+$gbAuto.Controls.AddRange(@($cbAutoTray,$cbAutoWatch,$lblAutoTg,$cbAutoServer))
 
 $btnInstall = New-Object System.Windows.Forms.Button
 $btnInstall.Text = "安装"
@@ -545,6 +551,7 @@ function Start-InstalledProcesses {
   param(
     [string]$targetDir,
     [bool]$startTray,
+    [bool]$startCodexWatch,
     [bool]$startTelegramBridge,
     [bool]$startServer
   )
@@ -553,6 +560,13 @@ function Start-InstalledProcesses {
     $trayVbs = Join-Path $targetDir "notify-tray.vbs"
     if (Test-Path $trayVbs) {
       try { Start-Process -FilePath "wscript.exe" -ArgumentList "`"$trayVbs`"" -WindowStyle Hidden | Out-Null } catch {}
+    }
+  }
+
+  if ($startCodexWatch) {
+    $watchVbs = Join-Path $targetDir "codex-watch.vbs"
+    if (Test-Path $watchVbs) {
+      try { Start-Process -FilePath "wscript.exe" -ArgumentList "`"$watchVbs`"" -WindowStyle Hidden | Out-Null } catch {}
     }
   }
 
@@ -805,6 +819,7 @@ $btnInstall.Add_Click({
   if ($updates.Count -gt 0) { Update-EnvFile -path $envPath -updates $updates }
 
   Set-Autostart -name "NotifyTray" -value ("wscript.exe `"$targetDir\notify-tray.vbs`"") -enable $cbAutoTray.Checked
+  Set-Autostart -name "NotifyCodexWatch" -value ("wscript.exe `"$targetDir\codex-watch.vbs`"") -enable $cbAutoWatch.Checked
   Set-Autostart -name "NotifyTelegramBridge" -value ("wscript.exe `"$targetDir\telegram-bridge.vbs`"") -enable $cbTg.Checked
   Set-Autostart -name "NotifyServer" -value ("wscript.exe `"$targetDir\notify-server.vbs`"") -enable $cbAutoServer.Checked
 
@@ -824,6 +839,7 @@ $btnInstall.Add_Click({
 
   Start-InstalledProcesses -targetDir $targetDir `
     -startTray $cbAutoTray.Checked `
+    -startCodexWatch $cbAutoWatch.Checked `
     -startTelegramBridge $cbTg.Checked `
     -startServer $cbAutoServer.Checked
 

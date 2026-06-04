@@ -311,10 +311,16 @@ $cbAutoTray.AutoSize = $true
 $cbAutoTray.Location = New-Object System.Drawing.Point(16, 30)
 $cbAutoTray.Checked = (Get-AutostartEnabled -name "NotifyTray")
 
+$cbAutoWatch = New-Object System.Windows.Forms.CheckBox
+$cbAutoWatch.Text = "Codex 监控"
+$cbAutoWatch.AutoSize = $true
+$cbAutoWatch.Location = New-Object System.Drawing.Point(120, 30)
+$cbAutoWatch.Checked = (Get-AutostartEnabled -name "NotifyCodexWatch")
+
 $cbAutoTg = New-Object System.Windows.Forms.CheckBox
 $cbAutoTg.Text = "Telegram Bridge"
 $cbAutoTg.AutoSize = $true
-$cbAutoTg.Location = New-Object System.Drawing.Point(200, 30)
+$cbAutoTg.Location = New-Object System.Drawing.Point(240, 30)
 $cbAutoTg.Checked = (Get-AutostartEnabled -name "NotifyTelegramBridge")
 
 $cbAutoServer = New-Object System.Windows.Forms.CheckBox
@@ -323,7 +329,7 @@ $cbAutoServer.AutoSize = $true
 $cbAutoServer.Location = New-Object System.Drawing.Point(400, 30)
 $cbAutoServer.Checked = (Get-AutostartEnabled -name "NotifyServer")
 
-$gbAuto.Controls.AddRange(@($cbAutoTray,$cbAutoTg,$cbAutoServer))
+$gbAuto.Controls.AddRange(@($cbAutoTray,$cbAutoWatch,$cbAutoTg,$cbAutoServer))
 
 $btnSave = New-Object System.Windows.Forms.Button
 $btnSave.Text = "保存"
@@ -402,6 +408,7 @@ $btnSave.Add_Click({
 
   $bin = $PSScriptRoot
   Set-Autostart -name "NotifyTray" -value ("wscript.exe `"$bin\notify-tray.vbs`"") -enable $cbAutoTray.Checked
+  Set-Autostart -name "NotifyCodexWatch" -value ("wscript.exe `"$bin\codex-watch.vbs`"") -enable $cbAutoWatch.Checked
   Set-Autostart -name "NotifyTelegramBridge" -value ("wscript.exe `"$bin\telegram-bridge.vbs`"") -enable $cbAutoTg.Checked
   Set-Autostart -name "NotifyServer" -value ("wscript.exe `"$bin\notify-server.vbs`"") -enable $cbAutoServer.Checked
 
