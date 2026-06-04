@@ -25,7 +25,7 @@ function Find-ClaudeWindow {
       $ppid = $cim.ParentProcessId
       if (-not $ppid -or $ppid -eq $walkPid) { break }
       $pp = Get-Process -Id $ppid -ErrorAction SilentlyContinue
-      if ($pp -and $pp.MainWindowHandle -ne [IntPtr]::Zero) {
+      if ($pp -and $pp.MainWindowHandle -ne [IntPtr]::Zero -and $pp.ProcessName -notmatch '^(explorer|ApplicationFrameHost|TextInputHost|ShellExperienceHost|SearchHost)$') {
         return $pp.MainWindowHandle
       }
       $walkPid = $ppid
