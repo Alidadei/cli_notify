@@ -571,6 +571,70 @@ function Start-InstalledProcesses {
   }
 }
 
+function Install-ClaudeCodePlugin {
+  param([string]$notifyScriptPath)
+
+  $pluginDir = Join-Path $env:USERPROFILE ".claude\plugins\notify"
+  $pluginJsonDir = Join-Path $pluginDir ".claude-plugin"
+  $hooksDir = Join-Path $pluginDir "hooks"
+
+  try {
+    if (-not (Test-Path $pluginJsonDir)) { New-Item -ItemType Directory -Path $pluginJsonDir -Force | Out-Null }
+    if (-not (Test-Path $hooksDir)) { New-Item -ItemType Directory -Path $hooksDir -Force | Out-Null }
+  } catch { return $false }
+
+  $escapedPath = $notifyScriptPath -replace '\\', '\\\\'
+  $pluginJson = @{
+    name = "notify"
+    version = "1.0.0"
+    description = "Windows toast notifications for Claude Code task completion and AskUserQuestion events"
+    author = @{ name = "notify" }
+    hooks = "./hooks/hooks.json"
+  } | ConvertTo-Json -Depth 4
+
+  $hooksJson = @{
+    description = "Send Windows toast when Claude finishes responding or asks a question"
+    hooks = @{
+      Stop = @(@{
+        matcher = "*"
+        hooks = @(@{
+          type = "command"
+          command = "powershell -NoProfile -ExecutionPolicy Bypass -File `"$escapedPath`" -Source Claude"
+        })
+      })
+      PreToolUse = @(@{
+        matcher = "AskUserQuestion"
+        hooks = @(@{
+          type = "command"
+          command = "powershell -NoProfile -ExecutionPolicy Bypass -File `"$escapedPath`" -Source Claude"
+        })
+      })
+    }
+  } | ConvertTo-Json -Depth 6
+
+  try {
+    Set-Content -Path (Join-Path $pluginJsonDir "plugin.json") -Value $pluginJson -Encoding UTF8
+    Set-Content -Path (Join-Path $hooksDir "hooks.json") -Value $hooksJson -Encoding UTF8
+    return $true
+  } catch {
+    return $false
+  }
+}
+
+function Remove-HooksFromSettings {
+  # Remove stale hooks block from settings.local.json to avoid conflicts with plugin
+  $settingsPath = Join-Path $env:USERPROFILE ".claude\settings.local.json"
+  if (-not (Test-Path $settingsPath)) { return }
+  try {
+    $content = Get-Content -Path $settingsPath -Raw -Encoding UTF8
+    $settings = $content | ConvertFrom-Json
+    if ($settings.hooks) {
+      $settings.PSObject.Properties.Remove("hooks")
+      $settings | ConvertTo-Json -Depth 10 | Set-Content -Path $settingsPath -Encoding UTF8
+    }
+  } catch {}
+}
+
 function Set-ServersPanel {
   param([bool]$expanded)
   if ($expanded) {
@@ -678,6 +742,12 @@ $btnInstall.Add_Click({
 
   try { Install-Payload -targetDir $targetDir }
   catch { [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, "错误"); return }
+
+  # Install Claude Code plugin for persistent hook isolation
+  $notifyPs1 = Join-Path $targetDir "notify.ps1"
+  if (Install-ClaudeCodePlugin -notifyScriptPath $notifyPs1) {
+    Remove-HooksFromSettings
+  }
 
   $envPath = Join-Path $targetDir ".env"
   Ensure-EnvTemplate -path $envPath

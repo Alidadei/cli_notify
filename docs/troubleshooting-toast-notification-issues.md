@@ -68,24 +68,32 @@ Start-Process wscript -ArgumentList "`"$vbsPath`"", "`"$Title`"", "`"$snippet`""
 
 ### 问题 4：对话结束时没有通知
 
-**根因**：`settings.json` 中缺少 `hooks` 配置。
+**根因**：hooks 未配置或配置丢失。
 
 **排查过程**：
-1. 检查日志显示 `[windows] ok`，说明通知被触发
-2. 但这些是手动测试的通知，不是 hook 触发的
-3. 检查 `C:\Users\y\.claude\settings.json` 发现没有 `hooks` 配置
+1. 检查 `~/.claude/plugins/notify/hooks/hooks.json` 是否存在
+2. 如果没有插件，检查 `~/.claude/settings.local.json` 是否有 `hooks` 字段
+3. 如果都没有，运行一键安装脚本重新部署
 
-**修复**：在 `settings.json` 中添加 Stop hook 配置
+**修复 A（推荐 — 插件方式）**：确保插件文件存在
+```powershell
+# 检查插件是否存在
+Test-Path "$env:USERPROFILE\.claude\plugins\notify\hooks\hooks.json"
+# 如果不存在，运行安装脚本
+& "C:\Users\y\bin\notify-setup.ps1"
+```
+
+**修复 B（旧方式 — settings.json）**：在 `settings.local.json` 中添加 hooks（不推荐，容易误删）
 ```json
 {
   "hooks": {
     "Stop": [
       {
+        "matcher": "*",
         "hooks": [
           {
             "type": "command",
-            "command": "& 'C:\\Users\\y\\bin\\notify.ps1' -Source 'Claude'",
-            "shell": "powershell"
+            "command": "powershell -NoProfile -ExecutionPolicy Bypass -File \"C:\\Users\\y\\bin\\notify.ps1\" -Source Claude"
           }
         ]
       }
@@ -93,6 +101,18 @@ Start-Process wscript -ArgumentList "`"$vbsPath`"", "`"$Title`"", "`"$snippet`""
   }
 }
 ```
+
+### 问题 5：点击 toast 不跳转（Windows Terminal）
+
+**根因**：窗口查找逻辑只认 `cmd.exe`，但 Windows Terminal 中 `cmd.exe` 的 `MainWindowHandle` 为 0，实际窗口属于 `wt.exe`。
+
+**修复**：`notify.ps1` 和 `notify-toast-wait.ps1` 的进程树遍历已改为接受任意有可见窗口的祖先进程，不再限制 `ProcessName -eq 'cmd'`。
+
+**验证**：查看日志中 hWnd 是否为非零值
+```powershell
+Get-Content "$env:LOCALAPPDATA\notify\notify-$(Get-Date -Format 'yyyyMMdd').log" | Select-String "hWnd"
+```
+如果 hWnd=0 说明仍未找到窗口；非零值说明正确识别。`
 
 ## 排查技巧
 
