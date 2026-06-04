@@ -989,21 +989,31 @@ if (Test-Path $flagWin) {
       if ($params -contains 'ActivatedAction' -and (Test-Path $script:toastWaitScript)) {
         # Show toast via background process that handles click-to-focus
         $script:toastActivated = $true
-        # Walk process tree to find the nearest ancestor window (works with cmd.exe, wt.exe, etc.)
+        # Find target terminal window for click-to-focus
+        # Process tree is unreliable (WindowsTerminal is not an ancestor of hook processes),
+        # so search all visible terminal windows directly.
         $consoleWnd = "0"
         try {
-          $walkPid = $PID
-          for ($depth = 0; $depth -lt 10; $depth++) {
-            $cim = Get-CimInstance Win32_Process -Filter "ProcessId=$walkPid" -ErrorAction SilentlyContinue
-            if (-not $cim) { break }
-            $ppid = $cim.ParentProcessId
-            if (-not $ppid -or $ppid -eq $walkPid) { break }
-            $pp = Get-Process -Id $ppid -ErrorAction SilentlyContinue
-            if ($pp -and $pp.MainWindowHandle -ne [IntPtr]::Zero -and $pp.ProcessName -notmatch '^(explorer|ApplicationFrameHost|TextInputHost|ShellExperienceHost|SearchHost)$') {
-              $consoleWnd = $pp.MainWindowHandle.ToString()
-              break
+          Add-Type -Name WF -Namespace Win32 -MemberDefinition '[DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();' -ErrorAction SilentlyContinue
+          $terminals = @(Get-Process -Name cmd, WindowsTerminal, wt, powershell, pwsh -ErrorAction SilentlyContinue |
+            Where-Object { $_.MainWindowHandle -ne [IntPtr]::Zero })
+          if ($terminals.Count -gt 0) {
+            # Prefer foreground window if it's a terminal
+            if ($terminals.Count -gt 1) {
+              try {
+                $fg = [Win32.WF]::GetForegroundWindow()
+                $fgMatch = $terminals | Where-Object { $_.MainWindowHandle -eq $fg }
+                if ($fgMatch) { $consoleWnd = $fgMatch[0].MainWindowHandle.ToString() }
+              } catch {}
             }
-            $walkPid = $ppid
+            # If no foreground match, prefer single terminal or most-CPU (likely the active Claude session)
+            if ($consoleWnd -eq "0") {
+              if ($terminals.Count -eq 1) {
+                $consoleWnd = $terminals[0].MainWindowHandle.ToString()
+              } else {
+                $consoleWnd = ($terminals | Sort-Object { -($_.CPU) } | Select-Object -First 1).MainWindowHandle.ToString()
+              }
+            }
           }
         } catch {}
         $vbsPath = Join-Path $PSScriptRoot "notify-toast-wait.vbs"
