@@ -898,7 +898,7 @@ if (Test-Path $flagWin) {
       if ($params -contains 'ActivatedAction' -and (Test-Path $script:toastWaitScript)) {
         # Show toast via background process that handles click-to-focus
         $script:toastActivated = $true
-        # Walk process tree to find the cmd.exe ancestor window (deterministic, no guessing)
+        # Walk process tree to find the nearest ancestor window (works with cmd.exe, wt.exe, etc.)
         $consoleWnd = "0"
         try {
           $walkPid = $PID
@@ -908,7 +908,7 @@ if (Test-Path $flagWin) {
             $ppid = $cim.ParentProcessId
             if (-not $ppid -or $ppid -eq $walkPid) { break }
             $pp = Get-Process -Id $ppid -ErrorAction SilentlyContinue
-            if ($pp -and $pp.ProcessName -eq 'cmd' -and $pp.MainWindowHandle -ne [IntPtr]::Zero) {
+            if ($pp -and $pp.MainWindowHandle -ne [IntPtr]::Zero) {
               $consoleWnd = $pp.MainWindowHandle.ToString()
               break
             }

@@ -17,7 +17,7 @@ Add-Type -Namespace Win32 -Name WF -ErrorAction SilentlyContinue -MemberDefiniti
 
 function Find-ClaudeWindow {
   try {
-    # Strategy 1: Walk own process tree to find cmd.exe ancestor (deterministic)
+    # Strategy 1: Walk own process tree to find nearest ancestor window (works with cmd.exe, wt.exe, etc.)
     $walkPid = $PID
     for ($depth = 0; $depth -lt 10; $depth++) {
       $cim = Get-CimInstance Win32_Process -Filter "ProcessId=$walkPid" -ErrorAction SilentlyContinue
@@ -25,7 +25,7 @@ function Find-ClaudeWindow {
       $ppid = $cim.ParentProcessId
       if (-not $ppid -or $ppid -eq $walkPid) { break }
       $pp = Get-Process -Id $ppid -ErrorAction SilentlyContinue
-      if ($pp -and $pp.ProcessName -eq 'cmd' -and $pp.MainWindowHandle -ne [IntPtr]::Zero) {
+      if ($pp -and $pp.MainWindowHandle -ne [IntPtr]::Zero) {
         return $pp.MainWindowHandle
       }
       $walkPid = $ppid
