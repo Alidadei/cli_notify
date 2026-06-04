@@ -5,18 +5,19 @@
 **把 Codex / Claude 的回复推送到 Windows 通知、企业微信或 Telegram**
 
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.1.6-green.svg)](VERSION)
+[![Version](https://img.shields.io/badge/version-0.1.7-green.svg)](VERSION)
 
 </div>
 
 ## ✨ 功能特性
 
-- 🖥️ **Windows Toast 通知** - 原生桌面通知，点击跳转到窗口
+- 🖥️ **Windows Toast 通知** - 原生桌面通知，点击跳转到窗口（支持 Windows Terminal / cmd）
 - 💬 **企业微信/Telegram 推送** - 远程接收通知，不错过重要消息
 - 🤖 **Telegram 远程控制** - `/codex`、`/claude` 闭环控制 AI 会话
 - 💭 **Telegram 继续对话** - 回复通知直接继续会话（支持图文、Thread）
 - 🎛️ **托盘菜单** - 一键开关通道、调试日志
 - 🌐 **HTTP 服务端** - 支持多台 Linux Codex 推送到同一台 Windows
+- 🎛️ **智能去重** - 同一轮对话仅提醒 1 次，30 分钟窗口，超限永久静默
 - ⚡ **低性能占用** - 内存 8-10 MB（临时），CPU ~0%
 
 ## 🚀 快速开始
@@ -134,6 +135,8 @@ Copy-Item "bin\*.vbs" -Destination "$env:USERPROFILE\bin\" -Force
 ```
 
 `PreToolUse` 中 `matcher` 为 `AskUserQuestion` 的 hook 用于 Claude 立即向你提问时的通知，`Notification` 中 `matcher` 为 `permission_prompt|idle_prompt` 的 hook 用于 Claude 需要你授权或长时间等待你处理时的通知，`Stop` 用于正常回复完成后的通知。
+
+**通知去重逻辑**：Stop 通知发出后，同一轮对话中的 idle_prompt 会被抑制 30 分钟。点击通知会刷新计时窗口。30 分钟后仅再提醒 **1 次**（可通过 `NOTIFY_MAX_REMINDERS` 环境变量调整），超限后永久静默。Claude 主动提问（AskUserQuestion）始终不受抑制。
 
 Codex 中途等待你授权或输入时的提醒由 `codex-watch.ps1` 提供；可直接运行 `& "$env:USERPROFILE\bin\codex-watch.ps1"`，或通过 `notify-restart.ps1` 一并启动。
 
@@ -260,9 +263,29 @@ New-Item -ItemType File -Path "$env:USERPROFILE\bin\notify.debug.enabled" -Force
 - 查看日志：`%LOCALAPPDATA%\notify\telegram-bridge.log`
 
 ### 对话结束时没有通知
-- 确认 `settings.json` 中 `hooks` 配置存在
+- 确认 `settings.json` 中 `hooks` 配置存在（运行 `.\setup-windows.ps1` 可自动配置）
 - 检查日志：`%LOCALAPPDATA%\notify\notify-*.log`
 - 手动测试：`& "$env:USERPROFILE\bin\notify.ps1" -Source 'Test'`
+
+### 点击通知后无法跳转到 Claude 窗口
+- **Windows Terminal 用户**：确保使用最新版 `notify.ps1` 和 `notify-toast-wait.ps1`（v0.1.6+ 已支持 Windows Terminal / wt 窗口检测）
+- 手动运行测试：通知出现后点击，应切换到 Claude 所在终端窗口
+
+### 收到重复的"需要处理"通知
+- 正常行为：Stop 通知发出后，同一轮对话的 idle_prompt 在 30 分钟内自动去重
+- 点击"Claude 已回复"通知即可刷新去重窗口，表示已确认
+- 30 分钟未交互时仅再提醒 **1 次**，之后永久静默（避免骚扰）
+- 可通过 `NOTIFY_MAX_REMINDERS` 调整上限，设为 0 则完全禁止 idle_prompt 提醒
+
+### 如何调整或关闭空闲提醒
+在 `%USERPROFILE%\bin\.env` 中设置：
+```bash
+# 最多提醒 2 次（默认 1 次）
+NOTIFY_MAX_REMINDERS=2
+
+# 完全关闭 idle_prompt 提醒（Stop 和 AskUserQuestion 不受影响）
+NOTIFY_MAX_REMINDERS=0
+```
 
 ## 📊 性能说明
 

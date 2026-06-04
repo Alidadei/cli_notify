@@ -17,7 +17,7 @@ Add-Type -Namespace Win32 -Name WF -ErrorAction SilentlyContinue -MemberDefiniti
 
 function Find-ClaudeWindow {
   try {
-    # Strategy 1: Walk own process tree to find nearest ancestor window (works with cmd.exe, wt.exe, etc.)
+    # Strategy 1: Walk own process tree to find nearest ancestor window (works with all terminal types)
     $walkPid = $PID
     for ($depth = 0; $depth -lt 10; $depth++) {
       $cim = Get-CimInstance Win32_Process -Filter "ProcessId=$walkPid" -ErrorAction SilentlyContinue
@@ -31,10 +31,10 @@ function Find-ClaudeWindow {
       $walkPid = $ppid
     }
 
-    # Strategy 2: Single Claude-titled cmd window
-    $procs = Get-Process -Name cmd -ErrorAction SilentlyContinue |
-      Where-Object { $_.MainWindowHandle -ne [IntPtr]::Zero -and $_.MainWindowTitle -match 'Claude' }
-    if ($procs) {
+    # Strategy 2: Claude-titled terminal window (cmd or WindowsTerminal)
+    $procs = @(Get-Process -Name cmd, WindowsTerminal, wt -ErrorAction SilentlyContinue |
+      Where-Object { $_.MainWindowHandle -ne [IntPtr]::Zero -and $_.MainWindowTitle -match 'Claude' })
+    if ($procs.Count -gt 0) {
       if ($procs.Count -eq 1) { return $procs[0].MainWindowHandle }
       # Multiple: prefer foreground, then most CPU
       $fgWnd = [Win32.WF]::GetForegroundWindow()
@@ -43,10 +43,14 @@ function Find-ClaudeWindow {
       return ($procs | Sort-Object { -($_.CPU) } | Select-Object -First 1).MainWindowHandle
     }
 
-    # Strategy 3: Any visible cmd window
-    $procs = Get-Process -Name cmd -ErrorAction SilentlyContinue |
-      Where-Object { $_.MainWindowHandle -ne [IntPtr]::Zero }
-    if ($procs) {
+    # Strategy 3: Any visible terminal window (cmd, WindowsTerminal, wt)
+    $procs = @(Get-Process -Name cmd, WindowsTerminal, wt -ErrorAction SilentlyContinue |
+      Where-Object { $_.MainWindowHandle -ne [IntPtr]::Zero })
+    if ($procs.Count -gt 0) {
+      # Prefer foreground if it's a terminal
+      $fgWnd = [Win32.WF]::GetForegroundWindow()
+      $fgProc = $procs | Where-Object { $_.MainWindowHandle -eq $fgWnd }
+      if ($fgProc) { return $fgProc[0].MainWindowHandle }
       if ($procs.Count -eq 1) { return $procs[0].MainWindowHandle }
       return ($procs | Sort-Object { -($_.CPU) } | Select-Object -First 1).MainWindowHandle
     }
@@ -77,6 +81,13 @@ $script:form = $null
 
 $icon.Add_BalloonTipClicked({
     $script:clicked = $true
+    # Refresh debounce timer on click so idle_prompt doesn't fire a redundant notification
+    try {
+      $debounceDir = Join-Path $env:LOCALAPPDATA "notify"
+      if (-not (Test-Path $debounceDir)) { New-Item -ItemType Directory -Path $debounceDir -Force | Out-Null }
+      $debounceFile = Join-Path $debounceDir "last-toast.json"
+      @{ time = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss') } | ConvertTo-Json | Set-Content -Path $debounceFile -Encoding UTF8
+    } catch {}
     if ($hWndParam -and $hWndParam -ne "0") {
       $hWnd = [IntPtr]([long]$hWndParam)
     } else {

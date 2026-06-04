@@ -270,7 +270,13 @@ function Test-ShouldSuppressNotification {
   $sessionId = Get-SessionId -p $p
   if (Test-SessionHasRecentAskUserQuestion -sessionId $sessionId) { return $true }
 
-  # Debounce: suppress Notification if a toast was shown within 30 seconds
+  # Session state check: Stop notification already sent for this turn, no new question since
+  if (Test-SessionHasRecentStop -sessionId $sessionId) {
+    Write-NotifyLog -Channel "invoke" -Status "skip" -Message "suppressed: Stop already notified for this session"
+    return $true
+  }
+
+  # Debounce: suppress Notification if a toast was shown within 120 seconds
   if (Test-Path $debounceFile) {
     try {
       $debounce = (Get-Content -Path $debounceFile -Raw) | ConvertFrom-Json
@@ -278,7 +284,7 @@ function Test-ShouldSuppressNotification {
         $lastTime = [datetime]::Parse([string]$debounce.time)
         $elapsed = ((Get-Date) - $lastTime).TotalSeconds
         Write-NotifyLog -Channel "debug" -Status "debounce" -Message "elapsed=$([math]::Round($elapsed,1))s"
-        if ($elapsed -le 30) { return $true }
+        if ($elapsed -le 120) { return $true }
       }
     } catch {}
   }
@@ -598,6 +604,8 @@ function Set-SessionAskUserQuestionState {
         source = $existing.source
         time = $(if ($time) { $time } elseif ($existing.time) { [string]$existing.time } else { $null })
         pendingAskTime = $(if ($Pending) { $time } else { $null })
+        lastStopTime = $(if ($Pending) { $existing.lastStopTime } else { $time })
+        reminderCount = $(if ($Pending) { $existing.reminderCount } else { 0 })
       }
     } else {
       [pscustomobject]@{
@@ -605,6 +613,8 @@ function Set-SessionAskUserQuestionState {
         source = $null
         time = $time
         pendingAskTime = $(if ($Pending) { $time } else { $null })
+        lastStopTime = $(if ($Pending) { $null } else { $time })
+        reminderCount = 0
       }
     }
     $state.sessions | Add-Member -MemberType NoteProperty -Name $sessionId -Value $entry -Force
@@ -629,6 +639,84 @@ function Test-SessionHasRecentAskUserQuestion {
   } catch {
     return $false
   }
+}
+
+function Test-SessionHasRecentStop {
+  param(
+    [string]$sessionId
+  )
+  if (-not $sessionId -or $sessionId -eq "unknown") { return $false }
+  try {
+    $state = Load-SessionMap
+    $entry = Get-SessionMapEntry -state $state -sessionId $sessionId
+    if (-not $entry) { return $false }
+    # If there's a pending AskUserQuestion, don't suppress — user needs to see it
+    if ($entry.pendingAskTime) { return $false }
+
+    # Determine the effective "last acknowledged" time
+    $effectiveTime = $null
+    if ($entry.lastStopTime) {
+      try { $effectiveTime = [datetime]::Parse([string]$entry.lastStopTime) } catch {}
+    }
+
+    # If user clicked a toast, use click time if more recent (extends the window)
+    if (Test-Path $debounceFile) {
+      try {
+        $debounce = (Get-Content -Path $debounceFile -Raw) | ConvertFrom-Json
+        if ($debounce -and $debounce.time) {
+          $clickTime = [datetime]::Parse([string]$debounce.time)
+          if (-not $effectiveTime -or $clickTime -gt $effectiveTime) {
+            $effectiveTime = $clickTime
+          }
+        }
+      } catch {}
+    }
+
+    if (-not $effectiveTime) { return $false }
+
+    # Within 30 minutes of last acknowledgment: suppress
+    $elapsed = ((Get-Date) - $effectiveTime).TotalMinutes
+    if ($elapsed -le 30) {
+      Write-NotifyLog -Channel "debug" -Status "debounce" -Message "session elapsed=$([math]::Round($elapsed,1))min (within window, suppress)"
+      return $true
+    }
+
+    # Beyond 30 minutes: check if we've exceeded max reminders for this turn
+    $maxReminders = 1
+    try {
+      $v = Get-NotifySetting -name "NOTIFY_MAX_REMINDERS" -cfg $notifyConfig
+      if ($v) { $maxReminders = [int]$v }
+    } catch {}
+
+    $count = 0
+    if ($entry.reminderCount) { $count = [int]$entry.reminderCount }
+
+    if ($count -ge $maxReminders) {
+      Write-NotifyLog -Channel "debug" -Status "debounce" -Message "session elapsed=$([math]::Round($elapsed,1))min reminderCount=$count/$maxReminders (max reached, suppress)"
+      return $true
+    }
+
+    Write-NotifyLog -Channel "debug" -Status "debounce" -Message "session elapsed=$([math]::Round($elapsed,1))min reminderCount=$count/$maxReminders (allow reminder)"
+    return $false
+  } catch {
+    return $false
+  }
+}
+
+function Increment-SessionReminderCount {
+  param([string]$sessionId)
+  if (-not $sessionId -or $sessionId -eq "unknown") { return }
+  try {
+    $state = Load-SessionMap
+    $entry = Get-SessionMapEntry -state $state -sessionId $sessionId
+    if (-not $entry) { return }
+    $count = 0
+    if ($entry.reminderCount) { $count = [int]$entry.reminderCount }
+    $entry | Add-Member -MemberType NoteProperty -Name reminderCount -Value ($count + 1) -Force
+    $state.sessions | Add-Member -MemberType NoteProperty -Name $sessionId -Value $entry -Force
+    Save-SessionMap -state $state
+    Write-NotifyLog -Channel "debug" -Status "debounce" -Message "session $sessionId reminderCount incremented to $($count+1)"
+  } catch {}
 }
 
 function Test-NotificationLooksLikeAskFollowUp {
@@ -764,6 +852,9 @@ if ($isAskUserQuestion) {
   Set-SessionAskUserQuestionState -sessionId $sessionId -Pending $true -time $endTime
 } elseif ($hookEventName -eq "Stop") {
   Set-SessionAskUserQuestionState -sessionId $sessionId -Pending $false -time $endTime
+} elseif ($hookEventName -eq "Notification") {
+  # Increment reminder count when an idle_prompt notification is allowed through
+  Increment-SessionReminderCount -sessionId $sessionId
 }
 
 $maxReply = 0  # 0 = no truncation
