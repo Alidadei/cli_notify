@@ -976,6 +976,85 @@ try {
 
 Write-NotifyLog -Channel "invoke" -Status "ok" -Message "$Source"
 
+# Win32 helper for precise terminal window detection
+# Uses EnumWindows + GetParent to map cmd.exe shell → WindowsTerminal window
+$terminalFinderDef = @'
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+using System.Text;
+
+public static class TerminalWindowFinder {
+    [DllImport("user32.dll")]
+    private static extern bool EnumWindows(EnumWinProc lpEnumFunc, IntPtr lParam);
+    [DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+    [DllImport("user32.dll")]
+    private static extern bool IsWindowVisible(IntPtr hWnd);
+    [DllImport("user32.dll")]
+    private static extern bool IsWindow(IntPtr hWnd);
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetParent(IntPtr hWnd);
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetAncestor(IntPtr hWnd, uint gaFlags);
+    [DllImport("user32.dll")]
+    private static extern int GetWindowText(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
+
+    private delegate bool EnumWinProc(IntPtr hWnd, IntPtr lParam);
+
+    [ThreadStatic]
+    private static List<IntPtr> _found;
+    [ThreadStatic]
+    private static int _targetPid;
+
+    private static bool Callback(IntPtr hWnd, IntPtr lParam) {
+        if (!IsWindowVisible(hWnd)) return true;
+        uint pid;
+        GetWindowThreadProcessId(hWnd, out pid);
+        if ((int)pid == _targetPid) _found.Add(hWnd);
+        return true;
+    }
+
+    public static IntPtr[] GetWindowsForPid(int pid) {
+        _found = new List<IntPtr>();
+        _targetPid = pid;
+        EnumWindows(Callback, IntPtr.Zero);
+        return _found.ToArray();
+    }
+
+    // Given a cmd.exe PID, locate the WindowsTerminal window that owns it.
+    // Uses unfiltered enumeration to find cmd.exe even when terminal is minimized.
+    public static IntPtr FindTerminalByCmdPid(int cmdPid) {
+        _found = new List<IntPtr>();
+        _targetPid = cmdPid;
+        EnumWindows(CallbackAll, IntPtr.Zero);
+        foreach (var w in _found) {
+            IntPtr root = GetAncestor(w, 3); // GA_ROOTOWNER
+            if (root != IntPtr.Zero && root != w) return root;
+            IntPtr parent = GetParent(w);
+            if (parent != IntPtr.Zero && parent != w) return parent;
+        }
+        return IntPtr.Zero;
+    }
+
+    // Callback without IsWindowVisible filter (finds minimized windows too)
+    private static bool CallbackAll(IntPtr hWnd, IntPtr lParam) {
+        if (!IsWindow(hWnd)) return true;
+        uint pid;
+        GetWindowThreadProcessId(hWnd, out pid);
+        if ((int)pid == _targetPid) _found.Add(hWnd);
+        return true;
+    }
+
+    public static string GetWindowTitle(IntPtr hWnd) {
+        var sb = new StringBuilder(512);
+        GetWindowText(hWnd, sb, 512);
+        return sb.ToString();
+    }
+}
+'@
+Add-Type -TypeDefinition $terminalFinderDef -ErrorAction SilentlyContinue
+
 # Windows toast
 if (Test-Path $flagWin) {
   Write-NotifyLog -Channel "windows" -Status "skip" -Message "disabled"
@@ -989,37 +1068,63 @@ if (Test-Path $flagWin) {
       if ($params -contains 'ActivatedAction' -and (Test-Path $script:toastWaitScript)) {
         # Show toast via background process that handles click-to-focus
         $script:toastActivated = $true
-        # Find target terminal window for click-to-focus
-        # Process tree is unreliable (WindowsTerminal is not an ancestor of hook processes),
-        # so search all visible terminal windows directly.
+        # Find the CORRECT terminal window for click-to-focus
+        # Strategy: walk process tree from hook → find cmd.exe hosting Claude →
+        #   use EnumWindows + GetParent to locate the WindowsTerminal window.
         $consoleWnd = "0"
+        $targetWinTitle = ""
         try {
-          Add-Type -Name WF -Namespace Win32 -MemberDefinition '[DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();' -ErrorAction SilentlyContinue
-          $terminals = @(Get-Process -Name cmd, WindowsTerminal, wt, powershell, pwsh -ErrorAction SilentlyContinue |
-            Where-Object { $_.MainWindowHandle -ne [IntPtr]::Zero })
-          if ($terminals.Count -gt 0) {
-            # Prefer foreground window if it's a terminal
-            if ($terminals.Count -gt 1) {
-              try {
-                $fg = [Win32.WF]::GetForegroundWindow()
-                $fgMatch = $terminals | Where-Object { $_.MainWindowHandle -eq $fg }
-                if ($fgMatch) { $consoleWnd = $fgMatch[0].MainWindowHandle.ToString() }
-              } catch {}
+          # Step 1: Walk UP process tree to find cmd.exe PID (the shell hosting Claude)
+          $claudeCmdPid = $null
+          $currentPid = $pid
+          $maxDepth = 10; $depth = 0
+          while ($currentPid -and $depth -lt $maxDepth) {
+            try {
+              $proc = Get-Process -Id $currentPid -ErrorAction Stop
+              if ($proc.ProcessName -eq 'cmd') { $claudeCmdPid = $currentPid; break }
+              $parentPid = (Get-CimInstance Win32_Process -Filter "ProcessId=$currentPid" -ErrorAction Stop).ParentProcessId
+              if (-not $parentPid -or $parentPid -eq 0 -or $parentPid -eq $currentPid) { break }
+              $currentPid = $parentPid; $depth++
+            } catch { break }
+          }
+
+          if ($claudeCmdPid) {
+            # Step 2: Find which WindowsTerminal window owns this cmd.exe
+            $terminalHwnd = [TerminalWindowFinder]::FindTerminalByCmdPid($claudeCmdPid)
+            if ($terminalHwnd -ne [IntPtr]::Zero) {
+              $consoleWnd = $terminalHwnd.ToString()
+              $targetWinTitle = [TerminalWindowFinder]::GetWindowTitle($terminalHwnd)
             }
-            # If no foreground match, prefer single terminal or most-CPU (likely the active Claude session)
-            if ($consoleWnd -eq "0") {
-              if ($terminals.Count -eq 1) {
-                $consoleWnd = $terminals[0].MainWindowHandle.ToString()
-              } else {
-                $consoleWnd = ($terminals | Sort-Object { -($_.CPU) } | Select-Object -First 1).MainWindowHandle.ToString()
+          }
+
+          # Fallback: precise method failed — enumerate ALL WT windows via EnumWindows
+          if ($consoleWnd -eq "0") {
+            $wtPids = @(Get-Process -Name WindowsTerminal, wt -ErrorAction SilentlyContinue |
+              ForEach-Object { $_.Id } | Select-Object -Unique)
+            $allTermWins = @()
+            foreach ($wtPid in $wtPids) {
+              $wins = [TerminalWindowFinder]::GetWindowsForPid($wtPid)
+              foreach ($w in $wins) {
+                $title = [TerminalWindowFinder]::GetWindowTitle($w)
+                if ($title) { $allTermWins += @{ hWnd = $w; Title = $title } }
               }
+            }
+            if ($allTermWins.Count -eq 1) {
+              $consoleWnd = $allTermWins[0].hWnd.ToString()
+              $targetWinTitle = $allTermWins[0].Title
+            } elseif ($allTermWins.Count -gt 1) {
+              # Heuristic: Claude tabs often start with '?'
+              $best = $allTermWins | Where-Object { $_.Title -match '^\?' } | Select-Object -First 1
+              if (-not $best) { $best = $allTermWins[0] }
+              $consoleWnd = $best.hWnd.ToString()
+              $targetWinTitle = $best.Title
             }
           }
         } catch {}
         $vbsPath = Join-Path $PSScriptRoot "notify-toast-wait.vbs"
-        Write-NotifyLog -Channel "debug" -Status "info" -Message "Title='$Title' SnippetLength=$($snippet.Length) hWnd=$consoleWnd"
+        Write-NotifyLog -Channel "debug" -Status "info" -Message "Title='$Title' SnippetLength=$($snippet.Length) hWnd=$consoleWnd winTitle=$targetWinTitle"
         if (Test-Path $vbsPath) {
-          Start-Process wscript -ArgumentList "`"$vbsPath`"", "`"$Title`"", "`"$snippet`"", "`"$consoleWnd`"" -WindowStyle Hidden
+          Start-Process wscript -ArgumentList "`"$vbsPath`"", "`"$Title`"", "`"$snippet`"", "`"$consoleWnd`"", "`"$targetWinTitle`"" -WindowStyle Hidden
         } else {
           $psArgs = "-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-File `"$($script:toastWaitScript)`"", "-Title `"$Title`"", "-Body `"$snippet`"", "-hWndParam `"$consoleWnd`""
           Start-Process powershell -ArgumentList $psArgs -WindowStyle Hidden

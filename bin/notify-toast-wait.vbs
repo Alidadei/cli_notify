@@ -11,4 +11,9 @@ If WScript.Arguments.Count > 2 Then
 Else
   hWnd = "0"
 End If
-oShell.Run "powershell -NoProfile -ExecutionPolicy Bypass -File """ & scriptDir & "\notify-toast-wait.ps1"" -Title """ & title & """ -Body """ & body & """ -hWndParam """ & hWnd & """", 0, False
+If WScript.Arguments.Count > 3 Then
+  winTitle = WScript.Arguments(3)
+Else
+  winTitle = ""
+End If
+oShell.Run "powershell -NoProfile -ExecutionPolicy Bypass -File """ & scriptDir & "\notify-toast-wait.ps1"" -Title """ & title & """ -Body """ & body & """ -hWndParam """ & hWnd & """ -WinTitle """ & winTitle & """", 0, False

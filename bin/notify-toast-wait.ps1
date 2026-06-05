@@ -1,74 +1,135 @@
-﻿param([string]$Title = "Claude", [string]$Body = "Click to focus", [int]$Timeout = 30, [string]$hWndParam = "")
+param([string]$Title = "Claude", [string]$Body = "Click to focus", [int]$Timeout = 30, [string]$hWndParam = "", [string]$WinTitle = "")
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
 $pinvoke = @'
 [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+[DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
+[DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr hWnd);
+[DllImport("user32.dll")] public static extern void SwitchToThisWindow(IntPtr hWnd, bool fAltTab);
 [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
 [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
-[DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
-[DllImport("user32.dll")] public static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
 [DllImport("user32.dll")] public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
-[DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
-[DllImport("user32.dll")] public static extern void SwitchToThisWindow(IntPtr hWnd, bool fAltTab);
-[DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
 '@
 Add-Type -Namespace Win32 -Name WF -ErrorAction SilentlyContinue -MemberDefinition $pinvoke
 
-function Find-ClaudeWindow {
+# Win32 helper: EnumWindows to see ALL windows (Get-Process only returns ONE per PID)
+$terminalFinderDef = @'
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+using System.Text;
+
+public static class TerminalWindowFinder {
+    [DllImport("user32.dll")]
+    private static extern bool EnumWindows(EnumWinProc lpEnumFunc, IntPtr lParam);
+    [DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+    [DllImport("user32.dll")]
+    private static extern bool IsWindowVisible(IntPtr hWnd);
+    [DllImport("user32.dll")]
+    private static extern int GetWindowText(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
+
+    private delegate bool EnumWinProc(IntPtr hWnd, IntPtr lParam);
+
+    [ThreadStatic]
+    private static List<IntPtr> _found;
+    [ThreadStatic]
+    private static int _targetPid;
+
+    private static bool Callback(IntPtr hWnd, IntPtr lParam) {
+        if (!IsWindowVisible(hWnd)) return true;
+        uint pid;
+        GetWindowThreadProcessId(hWnd, out pid);
+        if ((int)pid == _targetPid) _found.Add(hWnd);
+        return true;
+    }
+
+    public static IntPtr[] GetWindowsForPid(int pid) {
+        _found = new List<IntPtr>();
+        _targetPid = pid;
+        EnumWindows(Callback, IntPtr.Zero);
+        return _found.ToArray();
+    }
+
+    public static string GetWindowTitle(IntPtr hWnd) {
+        var sb = new StringBuilder(512);
+        GetWindowText(hWnd, sb, 512);
+        return sb.ToString();
+    }
+}
+'@
+Add-Type -TypeDefinition $terminalFinderDef -ErrorAction SilentlyContinue
+
+function Find-TerminalWindow {
+  # Use EnumWindows to see ALL visible terminal windows (not just one from Get-Process)
   try {
-    # Strategy 1: Walk own process tree to find nearest ancestor window (works with all terminal types)
-    $walkPid = $PID
-    for ($depth = 0; $depth -lt 10; $depth++) {
-      $cim = Get-CimInstance Win32_Process -Filter "ProcessId=$walkPid" -ErrorAction SilentlyContinue
-      if (-not $cim) { break }
-      $ppid = $cim.ParentProcessId
-      if (-not $ppid -or $ppid -eq $walkPid) { break }
-      $pp = Get-Process -Id $ppid -ErrorAction SilentlyContinue
-      if ($pp -and $pp.MainWindowHandle -ne [IntPtr]::Zero -and $pp.ProcessName -notmatch '^(explorer|ApplicationFrameHost|TextInputHost|ShellExperienceHost|SearchHost)$') {
-        return $pp.MainWindowHandle
+    $allWins = @()
+    $wtPids = @(Get-Process -Name WindowsTerminal, wt -ErrorAction SilentlyContinue |
+      ForEach-Object { $_.Id } | Select-Object -Unique)
+    foreach ($wtPid in $wtPids) {
+      $wins = [TerminalWindowFinder]::GetWindowsForPid($wtPid)
+      foreach ($w in $wins) {
+        $title = [TerminalWindowFinder]::GetWindowTitle($w)
+        if ($title) { $allWins += @{ hWnd = $w; Title = $title } }
       }
-      $walkPid = $ppid
     }
-
-    # Strategy 2: Claude-titled terminal window (cmd or WindowsTerminal)
-    $procs = @(Get-Process -Name cmd, WindowsTerminal, wt -ErrorAction SilentlyContinue |
-      Where-Object { $_.MainWindowHandle -ne [IntPtr]::Zero -and $_.MainWindowTitle -match 'Claude' })
-    if ($procs.Count -gt 0) {
-      if ($procs.Count -eq 1) { return $procs[0].MainWindowHandle }
-      # Multiple: prefer foreground, then most CPU
-      $fgWnd = [Win32.WF]::GetForegroundWindow()
-      $fgProc = $procs | Where-Object { $_.MainWindowHandle -eq $fgWnd }
-      if ($fgProc) { return $fgProc[0].MainWindowHandle }
-      return ($procs | Sort-Object { -($_.CPU) } | Select-Object -First 1).MainWindowHandle
-    }
-
-    # Strategy 3: Any visible terminal window (cmd, WindowsTerminal, wt)
-    $procs = @(Get-Process -Name cmd, WindowsTerminal, wt -ErrorAction SilentlyContinue |
-      Where-Object { $_.MainWindowHandle -ne [IntPtr]::Zero })
-    if ($procs.Count -gt 0) {
-      # Prefer foreground if it's a terminal
-      $fgWnd = [Win32.WF]::GetForegroundWindow()
-      $fgProc = $procs | Where-Object { $_.MainWindowHandle -eq $fgWnd }
-      if ($fgProc) { return $fgProc[0].MainWindowHandle }
-      if ($procs.Count -eq 1) { return $procs[0].MainWindowHandle }
-      return ($procs | Sort-Object { -($_.CPU) } | Select-Object -First 1).MainWindowHandle
-    }
+    if ($allWins.Count -eq 0) { return [IntPtr]::Zero }
+    if ($allWins.Count -eq 1) { return $allWins[0].hWnd }
+    # Prefer foreground if it's a terminal
+    $fgWnd = [Win32.WF]::GetForegroundWindow()
+    $fgMatch = $allWins | Where-Object { $_.hWnd -eq $fgWnd } | Select-Object -First 1
+    if ($fgMatch) { return $fgMatch.hWnd }
+    return $allWins[0].hWnd
   } catch {}
   return [IntPtr]::Zero
 }
 
-function Focus-ClaudeWindow {
+function Focus-Window {
   param([IntPtr]$hWnd)
   if ($hWnd -eq [IntPtr]::Zero) { return }
   try {
+    $fgWnd = [Win32.WF]::GetForegroundWindow()
+    $logPath = Join-Path $env:LOCALAPPDATA "notify\click-focus.log"
+    $ts = Get-Date -Format 'HH:mm:ss'
+    # Get foreground window info for diagnostics
+    $fgTitle = ''
+    $fgProc = ''
+    try {
+      $fgTitle = [TerminalWindowFinder]::GetWindowTitle($fgWnd)
+      $fgProcObj = Get-Process | Where-Object { $_.MainWindowHandle -eq $fgWnd } | Select-Object -First 1
+      if ($fgProcObj) { $fgProc = "$($fgProcObj.ProcessName)($($fgProcObj.Id))" }
+    } catch {}
+    if ($fgWnd -eq $hWnd) {
+      Add-Content -Path $logPath -Value "$ts FOCUS: already foreground (target=$hWnd)"
+      [Win32.WF]::ShowWindow($hWnd, 9) | Out-Null
+      return
+    }
+    # Alt key trick: simulates user input to grant foreground permission
+    [Win32.WF]::keybd_event(0x12, 0, 0, [UIntPtr]::Zero)
+    Start-Sleep -Milliseconds 10
+    [Win32.WF]::keybd_event(0x12, 0, 2, [UIntPtr]::Zero)
+    Start-Sleep -Milliseconds 10
+    # Minimize then restore to force Windows to redraw and move Z-order
+    [Win32.WF]::ShowWindow($hWnd, 6) | Out-Null
+    Start-Sleep -Milliseconds 50
     [Win32.WF]::ShowWindow($hWnd, 9) | Out-Null
-    # TOPMOST trick to bring window to front without keybd_event
+    Start-Sleep -Milliseconds 50
+    # Multi-pronged focus attack
+    [Win32.WF]::BringWindowToTop($hWnd) | Out-Null
+    $r1 = [Win32.WF]::SetForegroundWindow($hWnd)
     [Win32.WF]::SetWindowPos($hWnd, [IntPtr](-1), 0, 0, 0, 0, 0x0003) | Out-Null
-    Start-Sleep -Milliseconds 100
+    Start-Sleep -Milliseconds 50
     [Win32.WF]::SetWindowPos($hWnd, [IntPtr](-2), 0, 0, 0, 0, 0x0003) | Out-Null
     [Win32.WF]::SwitchToThisWindow($hWnd, $true)
-  } catch {}
+    # Verify: what's foreground now?
+    $fgAfter = [Win32.WF]::GetForegroundWindow()
+    $fgAfterTitle = ''
+    try { $fgAfterTitle = [TerminalWindowFinder]::GetWindowTitle($fgAfter) } catch {}
+    Add-Content -Path $logPath -Value "$ts FOCUS: SetFW=$r1 from(fg=$fgWnd $fgProc '$fgTitle') to(target=$hWnd) after(fg=$fgAfter '$fgAfterTitle')"
+  } catch {
+    Add-Content -Path $logPath -Value "$ts FOCUS ERROR: $($_.Exception.Message)"
+  }
 }
 
 $icon = New-Object System.Windows.Forms.NotifyIcon
@@ -81,19 +142,64 @@ $script:form = $null
 
 $icon.Add_BalloonTipClicked({
     $script:clicked = $true
-    # Refresh debounce timer on click so idle_prompt doesn't fire a redundant notification
+    # Refresh debounce timer on click
     try {
       $debounceDir = Join-Path $env:LOCALAPPDATA "notify"
       if (-not (Test-Path $debounceDir)) { New-Item -ItemType Directory -Path $debounceDir -Force | Out-Null }
       $debounceFile = Join-Path $debounceDir "last-toast.json"
       @{ time = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss') } | ConvertTo-Json | Set-Content -Path $debounceFile -Encoding UTF8
     } catch {}
+    # Find target window: prefer exact hWnd (unique), then title, then live search
+    $hWnd = [IntPtr]::Zero
+    # 1st: Try the EXACT hWnd captured at notification time (most precise)
     if ($hWndParam -and $hWndParam -ne "0") {
-      $hWnd = [IntPtr]([long]$hWndParam)
-    } else {
-      $hWnd = Find-ClaudeWindow
+      try {
+        $candidate = [IntPtr]([long]$hWndParam)
+        # Verify via EnumWindows that this hWnd still exists and is a visible WT window
+        $stillValid = $false
+        $wtPids = @(Get-Process -Name WindowsTerminal, wt -ErrorAction SilentlyContinue |
+          ForEach-Object { $_.Id } | Select-Object -Unique)
+        foreach ($wp in $wtPids) {
+          if ([TerminalWindowFinder]::GetWindowsForPid($wp) -contains $candidate) { $stillValid = $true; break }
+        }
+        if ($stillValid) { $hWnd = $candidate }
+      } catch {}
     }
-    Focus-ClaudeWindow -hWnd $hWnd
+    # 2nd: Fall back to title match (via EnumWindows — sees all windows)
+    if (($hWnd -eq [IntPtr]::Zero) -and $WinTitle -and $WinTitle -ne "") {
+      try {
+        $wtPids = @(Get-Process -Name WindowsTerminal, wt -ErrorAction SilentlyContinue |
+          ForEach-Object { $_.Id } | Select-Object -Unique)
+        foreach ($wp in $wtPids) {
+          foreach ($w in [TerminalWindowFinder]::GetWindowsForPid($wp)) {
+            if ([TerminalWindowFinder]::GetWindowTitle($w) -eq $WinTitle) { $hWnd = $w; break }
+          }
+          if ($hWnd -ne [IntPtr]::Zero) { break }
+        }
+      } catch {}
+    }
+    # 3rd: Last resort — live search via EnumWindows
+    if ($hWnd -eq [IntPtr]::Zero) {
+      $hWnd = Find-TerminalWindow
+    }
+    # Debug: log what was found (use EnumWindows for title lookup)
+    try {
+      $logDir = Join-Path $env:LOCALAPPDATA "notify"
+      if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
+      $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+      $method = if ($hWndParam -and $hWndParam -ne "0" -and $hWnd -ne [IntPtr]::Zero -and $hWnd.ToString() -eq $hWndParam) { "hWnd-exact" }
+                elseif ($WinTitle -and $hWnd -ne [IntPtr]::Zero) { "title-match" }
+                else { "live-search" }
+      if ($hWnd -ne [IntPtr]::Zero) {
+        $wTitle = [TerminalWindowFinder]::GetWindowTitle($hWnd)
+        Add-Content -Path (Join-Path $logDir "click-focus.log") -Value "$ts CLICK[$method]: hWnd=$hWnd title='$wTitle' winTitle='$WinTitle'"
+      } else {
+        Add-Content -Path (Join-Path $logDir "click-focus.log") -Value "$ts CLICK: hWnd=ZERO (no terminal found)"
+      }
+    } catch {}
+    if ($hWnd -ne [IntPtr]::Zero) {
+      Focus-Window -hWnd $hWnd
+    }
     if ($script:form) { $script:form.Close() }
 })
 
